@@ -50,6 +50,7 @@ object GenerateUnicodeTables {
       records = Tables.records(data)
       trie    = Tables.buildTrie(records)
       _ <- Tables.selfCheck(records, trie)
+      _ <- Emit.checkEncodable(trie)
       outputs = Emit.outputs(manifest, data, records, trie)
       report <- mode match {
                   case Mode.Write => Right(writeAll(outputs))
