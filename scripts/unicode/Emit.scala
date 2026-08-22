@@ -15,6 +15,8 @@ object Emit {
 
   val Eol: String = "\n"
 
+  val MaxColumn: Int = 140
+
   val CodePointTablePath: Path =
     Paths.get("modules", "stui-unicode", "shared", "src", "main", "scala", "stui", "unicode", "internal", "CodePointTable.scala")
 
@@ -149,20 +151,40 @@ object Emit {
     ).mkString("", Eol, Eol)
   }
 
-  def corpus(manifest: Manifest, packageName: String, objectName: String, doc: String, sourceFile: String, lines: List[String]): String = {
-    val sha256  = manifest.entries.find(_.name == sourceFile).map(_.sha256).getOrElse("unknown")
+  /** Every table value must fit the `value + 0x20` char encoding, otherwise `encodeValue` would truncate silently. */
+  def checkEncodable(trie: Trie): Either[String, Unit] = {
+    val tooLarge = List("index" -> trie.index, "leaves" -> trie.leaves, "records" -> trie.records).flatMap {
+      case (name, values) =>
+        values
+          .filter(_ > MaxValue)
+          .headOption
+          .map(value => s"$name contains ${value.toString}, above the encodable maximum ${MaxValue.toString}")
+    }
+    if (tooLarge.isEmpty) Right(()) else Left(tooLarge.mkString(", "))
+  }
+
+  def corpus(
+    manifest: Manifest,
+    packageName: String,
+    objectName: String,
+    doc: String,
+    sourceFile: String,
+    sha256: String,
+    headerSources: List[String],
+    lines: List[String],
+  ): String = {
     val imports = if (packageName == "stui.unicode.corpus") Nil else List("import stui.unicode.corpus.CorpusLines", "")
     (List(
-      header(manifest, List(sourceFile)),
+      header(manifest, headerSources),
       s"package $packageName",
       "",
     ) ++ imports ++ List(
       s"/** $doc */",
       s"object $objectName {",
       "",
-      s"""  val sourceFile: String = "$sourceFile"""",
+      stringVal("sourceFile", sourceFile),
       "",
-      s"""  val sha256: String = "$sha256"""",
+      stringVal("sha256", sha256),
       "",
       chunkArray("Chunks", lineChunks(lines).map(escape)),
       "",
@@ -171,6 +193,14 @@ object Emit {
       "}",
     )).mkString("", Eol, Eol)
   }
+
+  /** scalafmt (maxColumn 140) moves a string literal to its own line when the one-line `val` would be longer than that. */
+  def stringVal(name: String, value: String): String = {
+    val oneLine = s"""  val $name: String = "$value""""
+    if (oneLine.length <= MaxColumn) oneLine else s"""  val $name: String =$Eol    "$value""""
+  }
+
+  private def sha256Of(manifest: Manifest, name: String): String = manifest.entries.find(_.name == name).map(_.sha256).getOrElse("unknown")
 
   def outputs(manifest: Manifest, data: UcdData, records: Array[Int], trie: Trie): List[Output] =
     List(
@@ -183,6 +213,8 @@ object Emit {
           "GraphemeBreakTestCorpus",
           "The data part of every test line of GraphemeBreakTest.txt (`÷` break, `×` no break, hex code points), parsed by GraphemeBreakCase.",
           "GraphemeBreakTest.txt",
+          sha256Of(manifest, "GraphemeBreakTest.txt"),
+          List("GraphemeBreakTest.txt"),
           data.graphemeBreakTestLines,
         ),
       ),
@@ -194,6 +226,8 @@ object Emit {
           "EmojiTestCorpus",
           "Every fully-qualified emoji of emoji-test.txt as space-separated hex code points.",
           "emoji-test.txt",
+          sha256Of(manifest, "emoji-test.txt"),
+          List("emoji-test.txt"),
           data.emojiTestLines,
         ),
       ),
@@ -204,7 +238,9 @@ object Emit {
           "stui.unicode.internal",
           "RawRanges",
           "Run-length encoded records straight from the parsed UCD data (`START..END;GCB;INCB;EP;EMOJIPRESENTATION;WIDTH`), independent of the trie.",
-          "DerivedCoreProperties.txt",
+          TableSources.mkString(", "),
+          TableSources.map(name => sha256Of(manifest, name)).mkString(", "),
+          TableSources,
           Tables.rawRanges(records),
         ),
       ),
