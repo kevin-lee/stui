@@ -9,8 +9,13 @@ final case class UnicodeVersion(major: Int, minor: Int, update: Int)
 
 object UnicodeVersion {
 
-  /** The Unicode version the bundled tables were generated from. */
-  val current: UnicodeVersion = internal.CodePointTable.unicodeVersion
+  /** The Unicode version the bundled tables were generated from.
+    *
+    * A `def`, not a `val`: `CodePointTable`'s initialiser constructs a `UnicodeVersion` through this companion, so a `val` here would read
+    * `CodePointTable` back while it is being initialised. On the JVM two test threads initialising the two objects from opposite ends
+    * deadlock on the class-initialisation locks (observed on CI, 2026-08-22), on Scala.js the value would be null.
+    */
+  def current: UnicodeVersion = internal.CodePointTable.unicodeVersion
 
   extension (version: UnicodeVersion) {
 
