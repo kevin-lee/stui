@@ -25,6 +25,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    # M1a and M1b runs take 3-5 minutes, the GitHub default is 360. A hang (2026-08-22) must not burn the quota.
+    timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v7
 
