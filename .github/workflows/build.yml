@@ -36,6 +36,13 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
+      - uses: VirtusLab/scala-cli-setup@v1.16.0
+
+      - name: "Check the UCD generator formats and compiles"
+        run: |
+          scala-cli fmt --check --scalafmt-conf .scalafmt.conf scripts/unicode
+          scala-cli compile scripts/unicode
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
