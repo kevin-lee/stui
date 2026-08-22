@@ -21,9 +21,15 @@ object BreakIteratorOracleSpec extends Properties {
 
   val oracleName: String = "BreakIterator"
 
-  /** Probed through characters first assigned in each Unicode version (DerivedAge.txt). */
+  private val jdkFeature: Int = Runtime.version().feature()
+
+  /** Probed through characters first assigned in each Unicode version (DerivedAge.txt). Before JDK 20 (JDK-8291660) the character instance
+    * is the legacy iterator with no extended grapheme cluster support at all, which is reported as such instead of a Unicode version so a
+    * misconfigured CI JDK fails with a clear message (observed with Temurin 17 on 2026-08-23).
+    */
   val oracleUnicodeVersion: String =
-    if (Character.isDefined(0x1faea)) "17.0"
+    if (jdkFeature < 20) s"none (JDK ${jdkFeature.toString} has no extended grapheme cluster BreakIterator, JDK 21 is the baseline)"
+    else if (Character.isDefined(0x1faea)) "17.0"
     else if (Character.isDefined(0x1fae9)) "16.0"
     else if (Character.isDefined(0x2ebf0)) "15.1"
     else "15.0"
