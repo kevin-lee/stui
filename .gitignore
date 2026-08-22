@@ -76,3 +76,6 @@ hs_err_pid*
 
 # IntelliJ
 out/
+
+# stui-unicode generator download cache
+scripts/unicode/.cache/

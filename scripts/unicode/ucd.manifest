@@ -1,0 +1,10 @@
+# Unicode Character Database inputs for scripts/unicode (tab-separated: name, url, sha256).
+# The generator downloads each file into scripts/unicode/.cache/<version>/<name> and verifies the hash before use.
+version	17.0.0
+DerivedCoreProperties.txt	https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt	24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08
+EastAsianWidth.txt	https://www.unicode.org/Public/17.0.0/ucd/EastAsianWidth.txt	ea7ce50f3444a050333448dffef1cadd9325af55cbb764b4a2280faf52170a33
+GraphemeBreakProperty.txt	https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakProperty.txt	d6b51d1d2ae5c33b451b7ed994b48f1f4dc62b2272a5831e7fd418514a6bae89
+GraphemeBreakTest.txt	https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakTest.txt	e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec
+PropList.txt	https://www.unicode.org/Public/17.0.0/ucd/PropList.txt	130dcddcaadaf071008bdfce1e7743e04fdfbc910886f017d9f9ac931d8c64dd
+emoji-data.txt	https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-data.txt	2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b
+emoji-test.txt	https://www.unicode.org/Public/17.0.0/emoji/emoji-test.txt	1d8a944f88d7952f7ef7c5167fef3c67995bcae24543949710231b03a201acda
