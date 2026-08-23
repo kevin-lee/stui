@@ -59,7 +59,17 @@ lazy val unicodeNative = unicode.native.settings(nativeSettings)
 
 lazy val core       = module("stui-core", crossProject(JVMPlatform, JSPlatform, NativePlatform))
   .settings(
-    libraryDependencies += libs.refined4sCore.value
+    /* kittens' coproduct derivation needs more inlining depth than the compiler's default (32) for enums above about 22 variants,
+     * and `KeyCode` has 26. The limit applies only where the `derives` clause is compiled, so users of the published instances do not
+     * need it. */
+    scalacOptions += "-Xmax-inlines:64",
+    libraryDependencies ++= List(
+      libs.refined4sCore.value,
+      libs.refined4sCats.value,
+      libs.catsCore.value,
+      libs.kittens.value,
+      libs.extrasRender.value,
+    ),
   )
   .dependsOn(unicode)
 lazy val coreJvm    = core.jvm
@@ -111,7 +121,13 @@ lazy val props =
 
     val Version = "0.1.0-SNAPSHOT"
 
-    val Refined4sVersion = "1.20.0"
+    val Refined4sVersion = "1.21.0"
+
+    val CatsVersion = "2.13.0"
+
+    val KittensVersion = "3.5.0"
+
+    val ExtrasVersion = "0.56.0"
 
     val HedgehogVersion = "0.14.0"
 
@@ -125,6 +141,12 @@ lazy val props =
 lazy val libs =
   new {
     lazy val refined4sCore = Def.setting("io.kevinlee" %%% "refined4s-core" % props.Refined4sVersion)
+    lazy val refined4sCats = Def.setting("io.kevinlee" %%% "refined4s-cats" % props.Refined4sVersion)
+
+    lazy val catsCore = Def.setting("org.typelevel" %%% "cats-core" % props.CatsVersion)
+    lazy val kittens  = Def.setting("org.typelevel" %%% "kittens" % props.KittensVersion)
+
+    lazy val extrasRender = Def.setting("io.kevinlee" %%% "extras-render" % props.ExtrasVersion)
 
     lazy val hedgehogLibs = Def.setting(
       List(
@@ -152,6 +174,10 @@ lazy val jsSettings: Seq[Setting[_]] = List(
 lazy val nativeSettings: Seq[Setting[_]] = List(
   Test / fork := false
 )
+
+/* Sources shared by the JVM and Native platforms only (the blocking event source, design doc 6.3, cannot exist on JS) live in
+ * `modules/<name>/jvm-native/src/{main,test}/scala`. sbt-crossproject 1.4.0 adds that directory to both platform projects on its
+ * own (like `js-jvm` and `js-native`), so no setting is needed here. */
 
 def module(projectName: String, crossProject: CrossProject.Builder): CrossProject =
   crossProject
