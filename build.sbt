@@ -78,7 +78,7 @@ lazy val coreNative = core.native.settings(nativeSettings)
 
 lazy val testkit       = module("stui-testkit", crossProject(JVMPlatform, JSPlatform, NativePlatform))
   .settings(
-    libraryDependencies ++= libs.hedgehogLibsForTestkit.value
+    libraryDependencies ++= libs.hedgehogLibsForTestkit.value ++ List(libs.hedgehogExtraRefined4s.value)
   )
   .dependsOn(core)
 lazy val testkitJvm    = testkit.jvm
@@ -131,6 +131,8 @@ lazy val props =
 
     val HedgehogVersion = "0.14.0"
 
+    val HedgehogExtraVersion = "0.24.0"
+
     val JnaVersion = "5.19.1"
 
     val ScalafixRulesVersion = "0.6.29"
@@ -163,6 +165,9 @@ lazy val libs =
         "qa.hedgehog" %%% "hedgehog-runner" % props.HedgehogVersion,
       )
     )
+
+    /* 0.24.0 is the first version whose Native artifact is free of scala-native-crypto (its `genUuid` is a pure generator). */
+    lazy val hedgehogExtraRefined4s = Def.setting("io.kevinlee" %%% "hedgehog-extra-refined4s" % props.HedgehogExtraVersion)
 
     lazy val jna = "net.java.dev.jna" % "jna" % props.JnaVersion
   }
