@@ -2,6 +2,8 @@ package stui.unicode.internal
 
 /** Type-safe equality on `Int` for the table and segmentation hot paths.
   *
+  * Shared by every stui module (`private[stui]`) for primitive comparisons in hot loops, cats `===` boxes `Int`.
+  *
   * wartremover's `Equals` wart rejects `==` on every type, and a generic `===` would box the operands, so this is the one place where the
   * primitive comparison is wrapped. The methods are `inline`, so call sites pay nothing.
   *
@@ -9,7 +11,7 @@ package stui.unicode.internal
   * @since 2026-08-22
   */
 @SuppressWarnings(Array("org.wartremover.warts.Equals")) // reason: the single wrapped primitive comparison, inlined at every call site
-private[unicode] object IntOps {
+private[stui] object IntOps {
 
   extension (a: Int) {
 
