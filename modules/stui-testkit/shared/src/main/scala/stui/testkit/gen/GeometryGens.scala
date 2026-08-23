@@ -1,6 +1,7 @@
 package stui.testkit.gen
 
 import hedgehog.{Gen, Range}
+import hedgehog.extra.refined4s.gens.NumGens
 import refined4s.types.numeric.NonNegInt
 import stui.core.geometry.{Margin, Offset, Position, Rect, Size}
 
@@ -17,10 +18,8 @@ object GeometryGens {
     NonNegInt.from(bounded).fold(_ => NonNegInt.MinValue, identity)
   }
 
-  /** 0 to `max` inclusive. Hand-written (plan fallback F6): hedgehog-extra-refined4s pulls scala-native-crypto, which needs OpenSSL at link
-    * time, into every Native binary.
-    */
-  def nonNegInt(max: NonNegInt): Gen[NonNegInt] = Gen.int(Range.linear(0, max.value)).map(n => nonNegOrZero(n.toLong))
+  /** 0 to `max` inclusive, linear range. */
+  def nonNegInt(max: NonNegInt): Gen[NonNegInt] = NumGens.genNonNegIntMaxTo(max)
 
   /** 0, 1, 2, 100, and the two largest values. */
   val extremeNonNegInt: Gen[NonNegInt] =
