@@ -12,12 +12,15 @@ final case class TerminalOptions(features: Set[TerminalFeature]) derives Eq, Sho
 
 object TerminalOptions {
 
+  /** Raw mode only, no optional feature. */
   val none: TerminalOptions = TerminalOptions(Set.empty[TerminalFeature])
 
+  /** The options enabling exactly the given features. */
   def of(features: TerminalFeature*): TerminalOptions = TerminalOptions(features.toSet)
 
   extension (options: TerminalOptions) {
 
+    /** True when the feature is requested. */
     def enabled(feature: TerminalFeature): Boolean = options.features.contains(feature)
 
   }

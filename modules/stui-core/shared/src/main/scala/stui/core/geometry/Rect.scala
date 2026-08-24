@@ -16,6 +16,7 @@ final case class Rect(x: NonNegInt, y: NonNegInt, width: NonNegInt, height: NonN
 
 object Rect {
 
+  /** The zero-sized rect at the origin. */
   val empty: Rect = Rect(NonNegInt(0), NonNegInt(0), NonNegInt(0), NonNegInt(0))
 
   /** `Left` with refined4s's message when a component is negative. */
@@ -27,6 +28,7 @@ object Rect {
       h  <- NonNegInt.from(height)
     } yield Rect(px, py, w, h)
 
+  /** The rect of that size at that position. */
   def at(position: Position, size: Size): Rect = Rect(position.x, position.y, size.width, size.height)
 
   /** The rect of that size at the origin. */
@@ -36,12 +38,16 @@ object Rect {
 
   extension (rect: Rect) {
 
+    /** The top-left corner. */
     def position: Position = Position(rect.x, rect.y)
 
+    /** The width and height. */
     def size: Size = Size(rect.width, rect.height)
 
+    /** The first column, same as `x`. */
     def left: NonNegInt = rect.x
 
+    /** The first row, same as `y`. */
     def top: NonNegInt = rect.y
 
     /** `x + width`, saturated at `Int.MaxValue`. */

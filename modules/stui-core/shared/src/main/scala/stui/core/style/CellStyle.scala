@@ -14,6 +14,7 @@ final case class CellStyle(fg: Color, bg: Color, underlineColor: Color, modifier
 
 object CellStyle {
 
+  /** The terminal's own colours with no attributes. */
   val default: CellStyle = CellStyle(Color.Reset, Color.Reset, Color.Reset, Modifiers.empty)
 
   extension (cellStyle: CellStyle) {

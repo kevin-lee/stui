@@ -15,8 +15,10 @@ object KeyEvent {
   /** A press without modifiers. */
   def press(code: KeyCode): KeyEvent = KeyEvent(code, KeyModifiers.empty, KeyEventKind.Press)
 
+  /** A press with the given modifiers. */
   def pressWith(code: KeyCode, modifiers: KeyModifiers): KeyEvent = KeyEvent(code, modifiers, KeyEventKind.Press)
 
+  /** A key event with every field given. */
   def of(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind): KeyEvent = KeyEvent(code, modifiers, kind)
 
 }

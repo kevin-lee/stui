@@ -21,10 +21,13 @@ trait TerminalBackend {
   /** Pushes buffered output to the terminal. */
   def flush(): Unit
 
+  /** Moves the cursor to the position. */
   def moveCursor(position: Position): Unit
 
+  /** Makes the cursor visible. */
   def showCursor(): Unit
 
+  /** Hides the cursor. */
   def hideCursor(): Unit
 
   /** Clears the whole screen. */

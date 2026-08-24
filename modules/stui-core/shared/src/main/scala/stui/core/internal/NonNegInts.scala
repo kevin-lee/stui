@@ -32,8 +32,10 @@ private[core] object NonNegInts {
   /** Exact product. */
   def times(a: NonNegInt, b: NonNegInt): Long = a.value.toLong * b.value.toLong
 
+  /** The smaller of the two. */
   def min(a: NonNegInt, b: NonNegInt): NonNegInt = if (a.value <= b.value) a else b
 
+  /** The larger of the two. */
   def max(a: NonNegInt, b: NonNegInt): NonNegInt = if (a.value >= b.value) a else b
 
 }

@@ -14,6 +14,7 @@ final case class Position(x: NonNegInt, y: NonNegInt) derives Eq, Show, Hash
 
 object Position {
 
+  /** The position (0, 0). */
   val origin: Position = Position(NonNegInt(0), NonNegInt(0))
 
   /** `Left` with refined4s's message when a coordinate is negative. */

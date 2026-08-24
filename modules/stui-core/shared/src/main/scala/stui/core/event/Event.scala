@@ -21,12 +21,16 @@ enum Event derives Eq, Show, Hash {
 
 object Event {
 
+  /** A [[Key]] event. */
   def key(event: KeyEvent): Event = Key(event)
 
+  /** A [[Mouse]] event. */
   def mouse(event: MouseEvent): Event = Mouse(event)
 
+  /** A [[Resize]] event carrying the new size. */
   def resize(size: Size): Event = Resize(size)
 
+  /** A [[Paste]] event carrying the pasted text. */
   def paste(text: String): Event = Paste(text)
 
 }

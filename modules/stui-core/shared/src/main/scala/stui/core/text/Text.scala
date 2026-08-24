@@ -24,8 +24,10 @@ object Text {
   /** Raw lines with the style on the text. */
   def styled(content: String, style: Style): Text = Text(splitLines(content).map(Line.raw), style, none[Alignment])
 
+  /** The given lines, no text style, no alignment. */
   def of(lines: Line*): Text = fromLines(lines.toVector)
 
+  /** The given lines, no text style, no alignment. */
   def fromLines(lines: Vector[Line]): Text = Text(lines, Style.empty, none[Alignment])
 
   private def splitLines(content: String): Vector[String] =
@@ -36,13 +38,16 @@ object Text {
     /** The widest line, 0 without lines. */
     def width(policy: WidthPolicy): Int = text.lines.map(_.width(policy)).maxOption.getOrElse(0)
 
+    /** The number of lines. */
     def height: Int = text.lines.length
 
+    /** The text with its text style patched by `style`. */
     def patchStyle(style: Style): Text = text.copy(style = text.style.patch(style))
 
     /** The text style only, the lines keep theirs. */
     def resetStyle: Text = text.copy(style = Style.empty)
 
+    /** The text with the alignment set (lines without their own inherit it). */
     def aligned(alignment: Alignment): Text = text.copy(alignment = alignment.some)
 
     /** Every line with the text style patched by its own and the text alignment where it has none. */

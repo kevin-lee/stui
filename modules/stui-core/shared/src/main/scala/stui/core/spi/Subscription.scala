@@ -7,6 +7,7 @@ package stui.core.spi
   */
 trait Subscription {
 
+  /** Stops delivery. Safe to call more than once. */
   def cancel(): Unit
 
 }

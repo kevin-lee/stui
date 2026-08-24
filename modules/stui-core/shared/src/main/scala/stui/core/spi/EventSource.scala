@@ -10,6 +10,7 @@ import stui.core.event.Event
   */
 trait EventSource {
 
+  /** Registers the listener and returns the handle that removes it. */
   def subscribe(listener: Event => Unit): Subscription
 
 }

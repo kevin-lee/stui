@@ -10,6 +10,10 @@ type FunctionKeyNumber = FunctionKeyNumber.Type
   * @since 2026-08-23
   */
 object FunctionKeyNumber extends InlinedNumericMinMax[Int], CatsHash[Int], CatsShow[Int] {
+
+  /** F1 is the first function key. */
   override inline def minValue: Int = 1
+
+  /** F35, the kitty keyboard protocol's last function key. */
   override inline def maxValue: Int = 35
 }

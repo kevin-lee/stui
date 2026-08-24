@@ -26,6 +26,7 @@ object BufferGens {
     case PutLine(position: Position, line: Line, maxWidth: NonNegInt)
   }
 
+  /** Replays one operation on the canvas. */
   def run(canvas: Canvas, op: CanvasOp): Unit = op match {
     case CanvasOp.PutString(position, text, style) => canvas.putString(position, text, style)
     case CanvasOp.PutStringMax(position, text, style, maxWidth) => canvas.putStringMax(position, text, style, maxWidth)
@@ -35,6 +36,7 @@ object BufferGens {
     case CanvasOp.PutLine(position, line, maxWidth) => canvas.putLine(position, line, maxWidth)
   }
 
+  /** Replays the operations in order. */
   def runAll(canvas: Canvas, ops: List[CanvasOp]): Unit = ops.foreach(op => run(canvas, op))
 
   /** x and y in 0..5, width in 0..12, height in 0..6. */
@@ -53,6 +55,7 @@ object BufferGens {
       y <- Gen.long(Range.linear(area.y.value.toLong - 2L, area.y.value.toLong + area.height.value.toLong + 2L))
     } yield Position(nonNegOrZero(x), nonNegOrZero(y))
 
+  /** Rects mostly overlapping the area, sometimes hanging outside it. */
   def rectNear(area: Rect): Gen[Rect] =
     for {
       position <- positionNear(area)
@@ -84,17 +87,21 @@ object BufferGens {
           nonNegOrZero(height.toLong),
         )
 
+  /** Mostly printable ASCII, sometimes nasty Unicode. */
   val text: Gen[String] = Gen.frequency1(
     3 -> Gens.asciiPrintable(Range.linear(0, 12)),
     2 -> NastyGens.text(Range.linear(0, 6)),
     1 -> NastyGens.nastyString(Range.linear(0, 8)),
   )
 
+  /** Fill symbols: narrow ASCII, wide clusters, and arbitrary clusters. */
   val symbol: Gen[String] =
     Gen.frequency1(3 -> Gens.asciiPrintableChar.map(_.toString), 2 -> NastyGens.wideCluster, 1 -> NastyGens.cluster)
 
+  /** Width limits for the bounded write operations. */
   val maxWidth: Gen[NonNegInt] = Gen.int(Range.linear(0, 14)).map(n => nonNegOrZero(n.toLong))
 
+  /** One operation aimed mostly inside the area. */
   def canvasOp(area: Rect): Gen[CanvasOp] = Gen.frequency1(
     4 -> putStringOp(positionNear(area)),
     1 -> putStringMaxOp(positionNear(area)),
@@ -149,10 +156,13 @@ object BufferGens {
       max      <- maxWidth
     } yield CanvasOp.PutLine(position, line, max)
 
+  /** Operation lists of a length in the range. */
   def ops(area: Rect, range: Range[Int]): Gen[List[CanvasOp]] = canvasOp(area).list(range)
 
+  /** An empty buffer over the area with the operations replayed. */
   def bufferFrom(area: Rect, ops: List[CanvasOp]): Buffer = Buffer.empty(area).draw(canvas => runAll(canvas, ops))
 
+  /** Buffers built from random operation sequences. */
   val buffer: Gen[Buffer] =
     for {
       a  <- area

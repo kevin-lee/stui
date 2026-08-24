@@ -19,6 +19,7 @@ object DiffLaws {
   private def indexOf(buffer: Buffer, position: Position): Int =
     (position.y.value - buffer.area.y.value) * buffer.area.width.value + (position.x.value - buffer.area.x.value)
 
+  /** Empty diff on equal buffers, the apply round trip, minimality, completeness, ordering, and the full redraw, prefixed with `name`. */
   def laws(name: String, pairs: Gen[(Buffer, Buffer)], mismatched: Gen[(Buffer, Buffer)]): List[Test] = List(
     property(s"[$name] diff(b, b) is empty", pairs.forAll.map { case (b, _) => Result.assert(Buffer.diff(b, b).isEmpty) }),
     property(

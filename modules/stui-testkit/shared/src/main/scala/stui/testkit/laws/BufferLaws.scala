@@ -63,6 +63,7 @@ object BufferLaws {
     Result.all(Result.assert(cells.length.toLong === buffer.area.area).log("cell count") :: checks)
   }
 
+  /** Well-formedness, draw identity, outside-writes-change-nothing, and rendered row widths, each test prefixed with `name`. */
   def laws(name: String, buffers: Gen[Buffer], outside: Gen[(Buffer, List[CanvasOp])]): List[Test] = List(
     property(s"[$name] every buffer is well-formed", buffers.forAll.map(wellFormed)),
     property(s"[$name] draw with no operation is the identity", buffers.forAll.map(b => Assertions.eqv(b.draw(_ => ()), b))),

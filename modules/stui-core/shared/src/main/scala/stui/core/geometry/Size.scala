@@ -15,6 +15,7 @@ final case class Size(width: NonNegInt, height: NonNegInt) derives Eq, Show, Has
 
 object Size {
 
+  /** The size 0 x 0. */
   val zero: Size = Size(NonNegInt(0), NonNegInt(0))
 
   /** `Left` with refined4s's message when a side is negative. */

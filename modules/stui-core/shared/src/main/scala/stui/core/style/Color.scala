@@ -39,14 +39,22 @@ object Color {
   /** One truecolor component, 0 to 255. */
   type Channel = Channel.Type
   object Channel extends InlinedNumericMinMax[Int], CatsHash[Int], CatsShow[Int] {
+
+    /** The darkest component value. */
     override inline def minValue: Int = 0
+
+    /** The brightest component value. */
     override inline def maxValue: Int = 255
   }
 
   /** A 256-colour table index, 0 to 255. */
   type Index = Index.Type
   object Index extends InlinedNumericMinMax[Int], CatsHash[Int], CatsShow[Int] {
+
+    /** The first table entry. */
     override inline def minValue: Int = 0
+
+    /** The last table entry. */
     override inline def maxValue: Int = 255
   }
 
@@ -61,6 +69,7 @@ object Color {
       b <- Channel.from(blue)
     } yield Rgb(r, g, b)
 
+  /** Truecolor from already-refined channels. */
   def rgbOf(red: Channel, green: Channel, blue: Channel): Color = Rgb(red, green, blue)
 
   /** A 256-colour table entry from a literal, validated at compile time. Use [[indexedFrom]] for runtime values. */
@@ -69,6 +78,7 @@ object Color {
   /** A 256-colour table entry from a runtime value, `Left` with refined4s's message when outside 0..255. */
   def indexedFrom(index: Int): Either[String, Color] = Index.from(index).map(Indexed(_))
 
+  /** A 256-colour table entry from an already-refined index. */
   def indexedOf(index: Index): Color = Indexed(index)
 
 }

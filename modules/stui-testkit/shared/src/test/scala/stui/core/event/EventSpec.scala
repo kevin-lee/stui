@@ -17,8 +17,17 @@ object EventSpec extends Properties {
   override def tests: List[Test] = List(
     property("contains after add, not after remove", testAddRemove),
     property("union is commutative", testUnion),
+    property("union is associative", testUnionAssociative),
+    property(
+      "toList is in ordinal order",
+      EventGens.keyModifiers.forAll.map(m => Result.assert(m.toList === m.toList.sortBy(_.ordinal))),
+    ),
     property("of(toList) is the identity", EventGens.keyModifiers.forAll.map(m => Assertions.eqv(KeyModifiers.of(m.toList), m))),
     example("empty is empty", Result.assert(KeyModifiers.empty.isEmpty)),
+    example(
+      "show renders the members",
+      KeyModifiers(KeyModifier.Shift, KeyModifier.Control).show ==== "KeyModifiers(Shift, Control)",
+    ),
     property("events are equal to themselves", EventGens.event(NonNegInt(100)).forAll.map(event => Assertions.eqv(event, event))),
     property("key events are equal to themselves", EventGens.keyEvent.forAll.map(event => Assertions.eqv(event, event))),
     property("events have a non-empty Show", EventGens.event(NonNegInt(100)).forAll.map(event => Result.assert(event.show.nonEmpty))),
@@ -42,5 +51,12 @@ object EventSpec extends Properties {
       a <- EventGens.keyModifiers.forAll
       b <- EventGens.keyModifiers.forAll
     } yield Assertions.eqv(a.union(b), b.union(a))
+
+  def testUnionAssociative: Property =
+    for {
+      a <- EventGens.keyModifiers.forAll
+      b <- EventGens.keyModifiers.forAll
+      c <- EventGens.keyModifiers.forAll
+    } yield Assertions.eqv(a.union(b).union(c), a.union(b.union(c)))
 
 }
