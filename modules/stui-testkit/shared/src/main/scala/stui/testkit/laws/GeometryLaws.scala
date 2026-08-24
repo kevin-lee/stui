@@ -3,6 +3,7 @@ package stui.testkit.laws
 import cats.syntax.all.*
 import hedgehog.{Gen, Result}
 import hedgehog.runner.*
+import refined4s.types.numeric.NonNegInt
 import stui.core.geometry.{Margin, Offset, Position, Rect}
 import stui.testkit.Assertions
 import stui.unicode.internal.IntOps.*
@@ -125,6 +126,56 @@ object GeometryLaws {
         val results =
           List(r.inner(m), r.outer(m), r.offset(d), r.offset(d.negate), r.union(o), r.intersection(o), r.clamp(o), r.resize(o.size))
         Result.assert(results.length === 8)
+      },
+    ),
+  )
+
+  /** The [[stui.core.geometry.Rect.inset]] laws: containment, the `inner` equivalence, and the size arithmetic in `Long`. */
+  def insetLaws(name: String, rects: Gen[Rect], insets: Gen[NonNegInt]): List[Test] = List(
+    property(
+      s"[$name] inset is contained in the rect",
+      for {
+        r <- rects.forAll
+        l <- insets.forAll
+        t <- insets.forAll
+        g <- insets.forAll
+        b <- insets.forAll
+      } yield check(contained(r.inset(l, t, g, b), r), s"inset = ${r.inset(l, t, g, b).show}"),
+    ),
+    property(
+      s"[$name] inner(m) equals inset(h, v, h, v)",
+      for {
+        r <- rects.forAll
+        h <- insets.forAll
+        v <- insets.forAll
+      } yield Assertions.eqv(r.inner(Margin(h, v)), r.inset(h, v, h, v)),
+    ),
+    property(
+      s"[$name] the inset arithmetic holds in Long",
+      for {
+        r <- rects.forAll
+        l <- insets.forAll
+        t <- insets.forAll
+        g <- insets.forAll
+        b <- insets.forAll
+      } yield {
+        val result = r.inset(l, t, g, b)
+        Result.all(
+          List(
+            Result
+              .assert(result.x.value.toLong === math.min(r.x.value.toLong + l.value.toLong, MaxValue))
+              .log("x"),
+            Result
+              .assert(result.y.value.toLong === math.min(r.y.value.toLong + t.value.toLong, MaxValue))
+              .log("y"),
+            Result
+              .assert(result.width.value.toLong === math.max(0L, r.width.value.toLong - l.value.toLong - g.value.toLong))
+              .log("width"),
+            Result
+              .assert(result.height.value.toLong === math.max(0L, r.height.value.toLong - t.value.toLong - b.value.toLong))
+              .log("height"),
+          )
+        )
       },
     ),
   )

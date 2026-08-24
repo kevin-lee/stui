@@ -95,6 +95,18 @@ object Rect {
       )
     }
 
+    /** The rect shrunk by a per-side inset: the origin moves by `(left, top)` (saturated at `Int.MaxValue`), the width loses
+      * `left + right` and the height loses `top + bottom` (floored at 0), all evaluated in `Long`. Insets that meet or cross give an
+      * empty rect at the moved origin, and `inner(margin)` equals `inset(h, v, h, v)`.
+      */
+    def inset(left: NonNegInt, top: NonNegInt, right: NonNegInt, bottom: NonNegInt): Rect =
+      Rect(
+        NonNegInts.clamp(rect.x.value.toLong + left.value.toLong),
+        NonNegInts.clamp(rect.y.value.toLong + top.value.toLong),
+        NonNegInts.clamp(rect.width.value.toLong - left.value.toLong - right.value.toLong),
+        NonNegInts.clamp(rect.height.value.toLong - top.value.toLong - bottom.value.toLong),
+      )
+
     /** The origin moved by the offset (floored at 0, saturated), the size unchanged. */
     def offset(delta: Offset): Rect =
       Rect(NonNegInts.offset(rect.x, delta.dx), NonNegInts.offset(rect.y, delta.dy), rect.width, rect.height)

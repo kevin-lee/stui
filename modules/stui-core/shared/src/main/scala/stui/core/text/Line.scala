@@ -3,7 +3,12 @@ package stui.core.text
 import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
+import refined4s.types.numeric.NonNegInt
+import stui.core.buffer.Canvas
+import stui.core.geometry.{Position, Rect}
+import stui.core.internal.NonNegInts
 import stui.core.style.Style
+import stui.core.widget.Widget
 import stui.unicode.WidthPolicy
 
 /** One line of spans with a line-level style patch and an optional alignment. The style written for a span is the line style patched
@@ -12,7 +17,33 @@ import stui.unicode.WidthPolicy
   * @author Kevin Lee
   * @since 2026-08-23
   */
-final case class Line(spans: Vector[Span], style: Style, alignment: Option[Alignment]) derives Eq, Show, Hash
+final case class Line(spans: Vector[Span], style: Style, alignment: Option[Alignment]) extends Widget derives Eq, Show, Hash {
+
+  /* the method lives in the class body because it implements the Widget trait member (the documented carve-out from the
+   * extensions-in-companions rule) */
+  /** Writes the [[Line.resolvedSpans]] into the first row of `area` intersected with the canvas area, placed by this line's alignment
+    * (`Left` when absent) against the line's declared width, truncated on the right at the row's edge (the writer has no left-skip).
+    */
+  override def render(area: Rect, canvas: Canvas): Unit = {
+    val target = area.intersection(canvas.area)
+    if (target.isEmpty) {
+      ()
+    } else {
+      val declaredWidth = this.width(canvas.policy).toLong
+      val targetWidth   = target.width.value.toLong
+      val offset        = this.alignment.getOrElse(Alignment.Left) match {
+        case Alignment.Left => 0L
+        case Alignment.Center => math.max(0L, (targetWidth - declaredWidth) / 2L)
+        case Alignment.Right => math.max(0L, targetWidth - declaredWidth)
+      }
+      canvas.putLine(
+        Position(NonNegInts.clamp(target.x.value.toLong + offset), target.y),
+        this,
+        NonNegInts.clamp(targetWidth - offset),
+      )
+    }
+  }
+}
 
 object Line {
 
