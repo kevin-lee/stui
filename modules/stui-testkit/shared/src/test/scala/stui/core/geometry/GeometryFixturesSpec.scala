@@ -20,6 +20,18 @@ object GeometryFixturesSpec extends Properties {
   private inline def margin(inline h: Int, inline v: Int): Margin = Margin(NonNegInt(h), NonNegInt(v))
 
   override def tests: List[Test] = List(
+    example(
+      "inset shrinks per side",
+      Assertions.eqv(rect(0, 0, 10, 5).inset(NonNegInt(1), NonNegInt(1), NonNegInt(1), NonNegInt(1)), rect(1, 1, 8, 3)),
+    ),
+    example(
+      "inset with only a top inset",
+      Assertions.eqv(rect(0, 0, 3, 2).inset(NonNegInt(0), NonNegInt(2), NonNegInt(0), NonNegInt(0)), rect(0, 2, 3, 0)),
+    ),
+    example(
+      "insets that cross give an empty rect at the moved origin",
+      Assertions.eqv(rect(0, 0, 4, 4).inset(NonNegInt(3), NonNegInt(0), NonNegInt(3), NonNegInt(0)), rect(3, 0, 0, 4)),
+    ),
     example("inner shrinks by the margin on every side", Assertions.eqv(rect(1, 2, 10, 5).inner(margin(1, 1)), rect(2, 3, 8, 3))),
     example(
       "inner with an over-large margin is empty at the moved origin",

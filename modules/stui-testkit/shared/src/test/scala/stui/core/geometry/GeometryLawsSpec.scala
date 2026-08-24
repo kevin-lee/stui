@@ -25,9 +25,15 @@ object GeometryLawsSpec extends Properties {
   private val anyOffsets: Gen[Offset] =
     Gen.frequency1(5 -> smallOffsets, 1 -> GeometryGens.offset(Range.linear(-1000000000, 1000000000)))
 
+  private val smallInsets: Gen[NonNegInt] = GeometryGens.nonNegInt(NonNegInt(20))
+
+  private val anyInsets: Gen[NonNegInt] = Gen.frequency1(5 -> smallInsets, 1 -> GeometryGens.extremeNonNegInt)
+
   override def tests: List[Test] =
     GeometryLaws.algebraLaws("small", GeometryGens.rect(NonNegInt(200)), smallMargins, smallOffsets) ++
       GeometryLaws.algebraLaws("any", GeometryGens.anyRect, anyMargins, anyOffsets) ++
+      GeometryLaws.insetLaws("small", GeometryGens.rect(NonNegInt(200)), smallInsets) ++
+      GeometryLaws.insetLaws("any", GeometryGens.anyRect, anyInsets) ++
       GeometryLaws.partitionLaws("small", GeometryGens.rect(NonNegInt(30)), GeometryGens.position(NonNegInt(40)))
 
 }

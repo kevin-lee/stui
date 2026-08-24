@@ -3,7 +3,12 @@ package stui.core.text
 import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
+import refined4s.types.numeric.NonNegInt
+import stui.core.buffer.Canvas
+import stui.core.geometry.Rect
+import stui.core.internal.NonNegInts
 import stui.core.style.Style
+import stui.core.widget.Widget
 import stui.unicode.WidthPolicy
 
 /** Lines with a text-level style patch and an optional alignment that lines inherit when they have none
@@ -12,7 +17,25 @@ import stui.unicode.WidthPolicy
   * @author Kevin Lee
   * @since 2026-08-23
   */
-final case class Text(lines: Vector[Line], style: Style, alignment: Option[Alignment]) derives Eq, Show, Hash
+final case class Text(lines: Vector[Line], style: Style, alignment: Option[Alignment]) extends Widget derives Eq, Show, Hash {
+
+  /* the method lives in the class body because it implements the Widget trait member (the documented carve-out from the
+   * extensions-in-companions rule) */
+  /** Writes the [[Text.resolvedLines]] top to bottom into `area` intersected with the canvas area, one row each, every line rendered
+    * with [[Line.render]] (so with its resolved style and alignment), the lines below the area dropped.
+    */
+  override def render(area: Rect, canvas: Canvas): Unit = {
+    val target = area.intersection(canvas.area)
+    if (target.isEmpty) {
+      ()
+    } else {
+      this.resolvedLines.take(target.height.value).zipWithIndex.foreach {
+        case (line, i) =>
+          line.render(Rect(target.x, NonNegInts.clamp(target.y.value.toLong + i.toLong), target.width, NonNegInt(1)), canvas)
+      }
+    }
+  }
+}
 
 object Text {
 
