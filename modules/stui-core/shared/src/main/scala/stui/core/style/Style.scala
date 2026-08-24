@@ -23,6 +23,7 @@ final case class Style(
 
 object Style {
 
+  /** The patch that changes nothing, the monoid identity. */
   val empty: Style = Style(none[Color], none[Color], none[Color], Modifiers.empty, Modifiers.empty)
 
   /** `empty` and `patch`: associative because, per colour and per modifier bit, the last operand that says something wins. */
@@ -42,10 +43,13 @@ object Style {
         style.subModifiers.diff(other.addModifiers).union(other.subModifiers),
       )
 
+    /** The patch with the foreground set. */
     def withFg(color: Color): Style = style.copy(fg = color.some)
 
+    /** The patch with the background set. */
     def withBg(color: Color): Style = style.copy(bg = color.some)
 
+    /** The patch with the underline colour set. */
     def withUnderlineColor(color: Color): Style = style.copy(underlineColor = color.some)
 
     /** Turns the modifier on (and forgets an earlier removal). */
@@ -56,22 +60,31 @@ object Style {
     def removeModifier(modifier: Modifier): Style =
       style.copy(addModifiers = style.addModifiers.remove(modifier), subModifiers = style.subModifiers.add(modifier))
 
+    /** [[addModifier]] with [[Modifier.Bold]]. */
     def bold: Style = style.addModifier(Modifier.Bold)
 
+    /** [[addModifier]] with [[Modifier.Dim]]. */
     def dim: Style = style.addModifier(Modifier.Dim)
 
+    /** [[addModifier]] with [[Modifier.Italic]]. */
     def italic: Style = style.addModifier(Modifier.Italic)
 
+    /** [[addModifier]] with [[Modifier.Underlined]]. */
     def underlined: Style = style.addModifier(Modifier.Underlined)
 
+    /** [[addModifier]] with [[Modifier.SlowBlink]]. */
     def slowBlink: Style = style.addModifier(Modifier.SlowBlink)
 
+    /** [[addModifier]] with [[Modifier.RapidBlink]]. */
     def rapidBlink: Style = style.addModifier(Modifier.RapidBlink)
 
+    /** [[addModifier]] with [[Modifier.Reversed]]. */
     def reversed: Style = style.addModifier(Modifier.Reversed)
 
+    /** [[addModifier]] with [[Modifier.Hidden]]. */
     def hidden: Style = style.addModifier(Modifier.Hidden)
 
+    /** [[addModifier]] with [[Modifier.CrossedOut]]. */
     def crossedOut: Style = style.addModifier(Modifier.CrossedOut)
 
   }

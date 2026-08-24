@@ -10,9 +10,11 @@ import stui.core.style.{CellStyle, Color, Modifier, Modifiers, Style}
   */
 object StyleGens {
 
+  /** Any truecolor component. */
   val channel: Gen[Color.Channel] =
     Gen.int(Range.linear(0, 255)).map(n => Color.Channel.from(n).fold(_ => Color.Channel.MinValue, identity))
 
+  /** Any 256-colour table index. */
   val index: Gen[Color.Index] =
     Gen.int(Range.linear(0, 255)).map(n => Color.Index.from(n).fold(_ => Color.Index.MinValue, identity))
 
@@ -43,8 +45,10 @@ object StyleGens {
       b <- channel
     } yield Color.rgbOf(r, g, b)
 
+  /** Mostly named colours, sometimes `Rgb` or `Indexed`. */
   val color: Gen[Color] = Gen.frequency1(8 -> namedColor, 1 -> rgb, 1 -> index.map(Color.indexedOf))
 
+  /** Any single modifier. */
   val modifier: Gen[Modifier] = Gen.elementUnsafe(Modifier.all)
 
   /** A random subset. */
@@ -60,6 +64,7 @@ object StyleGens {
       sub <- modifiers
     } yield Style(fg, bg, ul, add, sub)
 
+  /** Any resolved cell style. */
   val cellStyle: Gen[CellStyle] =
     for {
       fg <- color

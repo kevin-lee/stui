@@ -13,6 +13,7 @@ final case class Margin(horizontal: NonNegInt, vertical: NonNegInt) derives Eq, 
 
 object Margin {
 
+  /** No inset on either axis. */
   val zero: Margin = Margin(NonNegInt(0), NonNegInt(0))
 
   /** `Left` with refined4s's message when a side is negative. */
@@ -22,6 +23,7 @@ object Margin {
       v <- NonNegInt.from(vertical)
     } yield Margin(h, v)
 
+  /** The same inset on both axes. */
   def uniform(n: NonNegInt): Margin = Margin(n, n)
 
 }

@@ -10,17 +10,20 @@ import stui.core.text.{Alignment, Line, Span, Text}
   */
 object TextGens {
 
+  /** Any alignment. */
   val alignment: Gen[Alignment] = Gen.element1(Alignment.Left, Alignment.Center, Alignment.Right)
 
   /** Mostly printable ASCII, sometimes nasty Unicode. */
   def content(range: Range[Int]): Gen[String] = Gen.frequency1(3 -> Gens.asciiPrintable(range), 1 -> NastyGens.nastyString(range))
 
+  /** Spans whose content length is in the range. */
   def span(range: Range[Int]): Gen[Span] =
     for {
       c <- content(range)
       s <- StyleGens.style
     } yield Span(c, s)
 
+  /** Lines with a span count in `spans`, content lengths in `range`, and optional alignment. */
   def line(spans: Range[Int], range: Range[Int]): Gen[Line] =
     for {
       ss <- span(range).list(spans)
@@ -28,6 +31,7 @@ object TextGens {
       al <- alignment.option
     } yield Line(ss.toVector, st, al)
 
+  /** Texts with a line count in `lines`, built from [[line]]. */
   def text(lines: Range[Int], spans: Range[Int], range: Range[Int]): Gen[Text] =
     for {
       ls <- line(spans, range).list(lines)

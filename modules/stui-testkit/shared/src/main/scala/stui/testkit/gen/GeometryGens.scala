@@ -25,18 +25,21 @@ object GeometryGens {
   val extremeNonNegInt: Gen[NonNegInt] =
     Gen.element1(NonNegInt(0), NonNegInt(1), NonNegInt(2), NonNegInt(100), NonNegInt(2147483646), NonNegInt.MaxValue)
 
+  /** Positions with both coordinates in 0..max. */
   def position(max: NonNegInt): Gen[Position] =
     for {
       x <- nonNegInt(max)
       y <- nonNegInt(max)
     } yield Position(x, y)
 
+  /** Sizes with both sides in 0..max. */
   def size(max: NonNegInt): Gen[Size] =
     for {
       width  <- nonNegInt(max)
       height <- nonNegInt(max)
     } yield Size(width, height)
 
+  /** Rects with every component in 0..max. */
   def rect(max: NonNegInt): Gen[Rect] =
     for {
       x      <- nonNegInt(max)
@@ -54,12 +57,14 @@ object GeometryGens {
       y      <- Gen.long(Range.linear(outer.y.value.toLong, outer.y.value.toLong + outer.height.value.toLong - height.value.toLong))
     } yield Rect(nonNegOrZero(x), nonNegOrZero(y), width, height)
 
+  /** Margins with both insets in 0..max. */
   def margin(max: NonNegInt): Gen[Margin] =
     for {
       horizontal <- nonNegInt(max)
       vertical   <- nonNegInt(max)
     } yield Margin(horizontal, vertical)
 
+  /** Offsets with both components in the range. */
   def offset(range: Range[Int]): Gen[Offset] =
     for {
       dx <- Gen.int(range)

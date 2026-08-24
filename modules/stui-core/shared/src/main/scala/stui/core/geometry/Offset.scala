@@ -13,6 +13,7 @@ final case class Offset(dx: Int, dy: Int) derives Eq, Show, Hash
 
 object Offset {
 
+  /** No displacement. */
   val zero: Offset = Offset(0, 0)
 
   extension (offset: Offset) {

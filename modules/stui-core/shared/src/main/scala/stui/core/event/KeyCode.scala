@@ -41,6 +41,7 @@ enum KeyCode derives Eq, Show, Hash {
 
 object KeyCode {
 
+  /** A [[Char]] key code. */
   def char(c: scala.Char): KeyCode = Char(c)
 
   /** A function key from a literal, validated at compile time (1 to 35). Use [[fFrom]] for runtime values. */
@@ -49,10 +50,13 @@ object KeyCode {
   /** A function key from a runtime value, `Left` with refined4s's message outside 1 to 35. */
   def fFrom(n: Int): Either[String, KeyCode] = FunctionKeyNumber.from(n).map(F(_))
 
+  /** A function key from an already-refined number. */
   def fOf(n: FunctionKeyNumber): KeyCode = F(n)
 
+  /** A [[Media]] key code. */
   def media(key: MediaKey): KeyCode = Media(key)
 
+  /** A [[Modifier]] key code. */
   def modifier(key: ModifierKey): KeyCode = Modifier(key)
 
 }

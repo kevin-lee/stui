@@ -38,7 +38,9 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
 
   private def index(x: Int, y: Int): Int = (y - areaY) * width + (x - areaX)
 
-  /** The cell at the position, `None` outside the area. */
+  /** The cell at the position, `None` outside the area. Reads still answer after the canvas is closed: the array is no longer
+    * mutated then, so the answer is the finished buffer's cell.
+    */
   def cell(position: Position): Option[Cell] =
     Option.when(inside(position.x.value.toLong, position.y.value.toLong))(cells(index(position.x.value, position.y.value)))
 
@@ -124,9 +126,10 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
   }
 
   /** Every cell of the intersection of `rect` with the area replaced (not patched) by the glyph with `CellStyle.default.patch(style)`: a
-    * zero-width symbol gives blanks, a two-column symbol gives glyph / continuation pairs from the left with an odd last column blank.
-    * Only the first cluster of `symbol` is used. The cells just outside the left and right edges are repaired (an owner of a
-    * continuation at the left edge, a continuation of a wide glyph at the right edge).
+    * zero-width symbol gives blanks, a two-column symbol gives glyph / continuation pairs from the left with an odd last column blank
+    * carrying the fill's style, and an empty `symbol` (no cluster) fills with blanks in the fill's style. Only the first cluster of
+    * `symbol` is used. The cells just outside the left and right edges are repaired (an owner of a continuation at the left edge, a
+    * continuation of a wide glyph at the right edge).
     */
   def fill(rect: Rect, symbol: String, style: Style): Unit =
     if (isOpen) {

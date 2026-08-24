@@ -21,10 +21,13 @@ enum MouseEventKind derives Eq, Show, Hash {
 
 object MouseEventKind {
 
+  /** A [[Down]] kind. */
   def down(button: MouseButton): MouseEventKind = Down(button)
 
+  /** An [[Up]] kind. */
   def up(button: MouseButton): MouseEventKind = Up(button)
 
+  /** A [[Drag]] kind. */
   def drag(button: MouseButton): MouseEventKind = Drag(button)
 
 }

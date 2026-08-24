@@ -26,11 +26,13 @@ object Buffer {
   /** Blank cells with [[WidthPolicy.default]]. */
   def empty(area: Rect): Buffer = emptyWith(WidthPolicy.default, area)
 
+  /** Blank cells measured by the given policy. */
   def emptyWith(policy: WidthPolicy, area: Rect): Buffer = new Buffer(area, policy, IArray.fill(cellCount(area))(Cell.blank))
 
   /** [[Canvas.fill]] over the whole area with [[WidthPolicy.default]]. */
   def filled(area: Rect, symbol: String, style: Style): Buffer = filledWith(WidthPolicy.default, area, symbol, style)
 
+  /** [[filled]] with the given policy. */
   def filledWith(policy: WidthPolicy, area: Rect, symbol: String, style: Style): Buffer =
     emptyWith(policy, area).draw(_.fill(area, symbol, style))
 
@@ -39,6 +41,7 @@ object Buffer {
     */
   def fromLines(lines: Vector[String]): Buffer = fromLinesWith(WidthPolicy.default, lines)
 
+  /** [[fromLines]] with the given policy. */
   def fromLinesWith(policy: WidthPolicy, lines: Vector[String]): Buffer = {
     val width  = NonNegInts.clamp(lines.map(line => policy.width(line).toLong).maxOption.getOrElse(0L))
     val height = NonNegInts.clamp(lines.length.toLong)
@@ -147,6 +150,7 @@ object Buffer {
       new Buffer(buffer.area, buffer.policy, IArray.unsafeFromArray(copy))
     }
 
+    /** The cells row by row. */
     def rows: Vector[Vector[Cell]] = {
       val w = buffer.area.width.value
       Vector.tabulate(buffer.area.height.value)(y => Vector.tabulate(w)(x => buffer.cells(y * w + x)))

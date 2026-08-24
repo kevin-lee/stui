@@ -25,6 +25,7 @@ object GlyphWidth {
 
   extension (width: GlyphWidth) {
 
+    /** 1 or 2. */
     def columns: Int = width match {
       case One => 1
       case Two => 2
