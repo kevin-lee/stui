@@ -3,6 +3,7 @@ package stui.testkit.gen
 import hedgehog.{Gen, Range}
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, Canvas}
+import stui.core.frame.RegionId
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.style.Style
 import stui.core.text.Line
@@ -24,6 +25,8 @@ object BufferGens {
     case Clear(rect: Rect)
     case PatchStyle(rect: Rect, style: Style)
     case PutLine(position: Position, line: Line, maxWidth: NonNegInt)
+    case Cursor(position: Position)
+    case Region(id: RegionId, rect: Rect)
   }
 
   /** Replays one operation on the canvas. */
@@ -34,6 +37,8 @@ object BufferGens {
     case CanvasOp.Clear(rect) => canvas.clear(rect)
     case CanvasOp.PatchStyle(rect, style) => canvas.patchStyle(rect, style)
     case CanvasOp.PutLine(position, line, maxWidth) => canvas.putLine(position, line, maxWidth)
+    case CanvasOp.Cursor(position) => canvas.cursor(position)
+    case CanvasOp.Region(id, rect) => canvas.region(id, rect)
   }
 
   /** Replays the operations in order. */
@@ -101,6 +106,9 @@ object BufferGens {
   /** Width limits for the bounded write operations. */
   val maxWidth: Gen[NonNegInt] = Gen.int(Range.linear(0, 14)).map(n => nonNegOrZero(n.toLong))
 
+  /** A handful of region ids, so generated frames repeat ids. */
+  val regionId: Gen[RegionId] = Gen.element1("a", "b", "c", "list", "input").map(RegionId(_))
+
   /** One operation aimed mostly inside the area. */
   def canvasOp(area: Rect): Gen[CanvasOp] = Gen.frequency1(
     4 -> putStringOp(positionNear(area)),
@@ -109,6 +117,8 @@ object BufferGens {
     1 -> rectNear(area).map(CanvasOp.Clear(_)),
     2 -> patchStyleOp(rectNear(area)),
     1 -> putLineOp(positionNear(area)),
+    1 -> positionNear(area).map(CanvasOp.Cursor(_)),
+    1 -> regionOp(rectNear(area)),
   )
 
   /** Operations whose positions and rects lie outside the area. */
@@ -119,6 +129,8 @@ object BufferGens {
     1 -> rectOutside(area).map(CanvasOp.Clear(_)),
     2 -> patchStyleOp(rectOutside(area)),
     1 -> putLineOp(rectOutside(area).map(_.position)),
+    1 -> rectOutside(area).map(rect => CanvasOp.Cursor(rect.position)),
+    1 -> regionOp(rectOutside(area)),
   )
 
   private def putStringOp(positions: Gen[Position]): Gen[CanvasOp] =
@@ -148,6 +160,12 @@ object BufferGens {
       rect  <- rects
       style <- StyleGens.style
     } yield CanvasOp.PatchStyle(rect, style)
+
+  private def regionOp(rects: Gen[Rect]): Gen[CanvasOp] =
+    for {
+      id   <- regionId
+      rect <- rects
+    } yield CanvasOp.Region(id, rect)
 
   private def putLineOp(positions: Gen[Position]): Gen[CanvasOp] =
     for {

@@ -1,6 +1,8 @@
 package stui.core.buffer
 
+import cats.syntax.all.*
 import refined4s.types.numeric.NonNegInt
+import stui.core.frame.{Region, RegionId}
 import stui.core.geometry.{Position, Rect}
 import stui.core.internal.NonNegInts
 import stui.core.style.{CellStyle, Style}
@@ -8,17 +10,27 @@ import stui.core.text.{Line, Span}
 import stui.unicode.{Graphemes, WidthPolicy}
 import stui.unicode.internal.IntOps.*
 
+import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.tailrec
 
 /** The one blessed mutable scope of the rendering pipeline (design principle 1): [[Buffer.draw]] opens a canvas over a copy of the cells,
   * runs the caller's block, closes the canvas, and wraps the cells into a new immutable buffer. Every operation returns `Unit`, clips to
   * the buffer area, maintains the [[Cell]] invariant, and does nothing once the canvas is closed, so a canvas that leaks out of the block
-  * is inert. The `Array` updates inside this class are the documented mutation sites, index arithmetic is plain `Int`.
+  * is inert. The `Array` updates inside this class are the documented mutation sites, index arithmetic is plain `Int`. Two operations
+  * record values instead of cells (design doc 6.4, decision D18): [[cursor]] and [[region]], kept by `Frame.draw` and discarded by
+  * `Buffer.draw`.
   *
   * @author Kevin Lee
   * @since 2026-08-23
   */
-final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cells: Array[Cell], open: Array[Boolean]) {
+final class Canvas private[buffer] (
+  val area: Rect,
+  val policy: WidthPolicy,
+  cells: Array[Cell],
+  open: Array[Boolean],
+  cursorRef: AtomicReference[Option[Position]],
+  regionsRef: AtomicReference[Vector[Region]],
+) {
 
   private val areaX: Int = area.x.value
 
@@ -101,13 +113,14 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
       }
     }
 
-  /** Writes one glyph of width `w` (1 or 2) at `(x, y)`, which is inside the area with `x + w <= right`, repairing the invariant around
-    * it: a continuation at `x` blanks its owner, a two-column glyph at `x` overwritten by a narrow one blanks its continuation, and a
+  /** Writes one glyph of width `w` (1 or 2) at `(x, y)`, which is inside the area with `x + w <= right`, wrapping the measured cluster as
+    * a trusted [[GlyphSymbol]] and repairing the invariant around it: a continuation at `x` blanks its owner, a two-column glyph at `x` overwritten by a narrow one blanks its continuation, and a
     * two-column glyph at `x + 1` overwritten by the new continuation blanks its own continuation.
     */
   private def writeGlyph(x: Int, y: Int, symbol: String, w: Int, style: Style): Unit = {
     val i        = index(x, y)
     val newStyle = cells(i).style.patch(style)
+    val glyph    = GlyphSymbol.trusted(symbol)
     cells(i) match {
       case Cell.Continuation(_) if x > areaX => cells(i - 1) = Cell.blank
       case Cell.Glyph(_, GlyphWidth.Two, _) if w === 1 && x.toLong + 1L < right => cells(i + 1) = Cell.blank
@@ -118,10 +131,10 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
         case Cell.Glyph(_, GlyphWidth.Two, _) if x.toLong + 2L < right => cells(i + 2) = Cell.blank
         case Cell.Glyph(_, _, _) | Cell.Continuation(_) => ()
       }
-      cells(i) = Cell.Glyph(symbol, GlyphWidth.Two, newStyle)
+      cells(i) = Cell.Glyph(glyph, GlyphWidth.Two, newStyle)
       cells(i + 1) = Cell.Continuation(newStyle)
     } else {
-      cells(i) = Cell.Glyph(symbol, GlyphWidth.One, newStyle)
+      cells(i) = Cell.Glyph(glyph, GlyphWidth.One, newStyle)
     }
   }
 
@@ -139,7 +152,7 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
       } else {
         val boundaries = Graphemes.boundaries(symbol)
         val w          = if (boundaries.length < 2) 0 else math.min(2, policy.clusterWidth(symbol, boundaries(0), boundaries(1)))
-        val glyph      = if (boundaries.length < 2) " " else sanitize(symbol.substring(boundaries(0), boundaries(1)))
+        val glyph      = if (w === 0) GlyphSymbol.space else GlyphSymbol.trusted(sanitize(symbol.substring(boundaries(0), boundaries(1))))
         val cellStyle  = CellStyle.default.patch(style)
         val tx         = target.x.value
         val tw         = target.width.value
@@ -150,7 +163,7 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
     }
 
   @tailrec
-  private def fillRows(y: Int, endY: Int, tx: Int, tw: Int, w: Int, glyph: String, cellStyle: CellStyle): Unit =
+  private def fillRows(y: Int, endY: Int, tx: Int, tw: Int, w: Int, glyph: GlyphSymbol, cellStyle: CellStyle): Unit =
     if (y >= endY) {
       ()
     } else {
@@ -160,7 +173,7 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
     }
 
   @tailrec
-  private def fillRow(y: Int, x: Int, endX: Int, w: Int, glyph: String, cellStyle: CellStyle): Unit =
+  private def fillRow(y: Int, x: Int, endX: Int, w: Int, glyph: GlyphSymbol, cellStyle: CellStyle): Unit =
     if (x >= endX) {
       ()
     } else if (w === 2 && x + 1 < endX) {
@@ -192,6 +205,29 @@ final class Canvas private[buffer] (val area: Rect, val policy: WidthPolicy, cel
 
   /** Every cell of the intersection becomes [[Cell.blank]], with the same edge repairs as [[fill]]. */
   def clear(rect: Rect): Unit = fill(rect, " ", Style.empty)
+
+  /** Records where the terminal cursor goes after the present (a text input's caret). A position outside the area is dropped, the last
+    * call wins, nothing happens once the canvas is closed.
+    */
+  def cursor(position: Position): Unit =
+    if (isOpen && inside(position.x.value.toLong, position.y.value.toLong)) cursorRef.set(position.some) else ()
+
+  /** Records `rect` intersected with the area as a hit region tagged with `id`, in draw order (`Regions.at` lets the last one win).
+    * An empty intersection records nothing, and nothing happens once the canvas is closed.
+    */
+  def region(id: RegionId, rect: Rect): Unit =
+    if (isOpen) {
+      val target = rect.intersection(area)
+      if (target.isEmpty) () else regionsRef.updateAndGet(_ :+ Region(id, target)): Unit
+    } else {
+      ()
+    }
+
+  /** The recorded cursor, read by `Frame.draw` after the render. */
+  private[core] def recordedCursor: Option[Position] = cursorRef.get()
+
+  /** The recorded regions in draw order, read by `Frame.draw` after the render. */
+  private[core] def recordedRegions: Vector[Region] = regionsRef.get()
 
   /** Every cell of the intersection gets its style patched. Styling either column of a two-column glyph styles the glyph, so the owner of
     * a continuation at the left edge and the continuation of a wide glyph at the right edge are patched as well.

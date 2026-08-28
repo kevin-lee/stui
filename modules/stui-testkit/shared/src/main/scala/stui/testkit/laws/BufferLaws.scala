@@ -3,7 +3,7 @@ package stui.testkit.laws
 import cats.syntax.all.*
 import hedgehog.{Gen, Result}
 import hedgehog.runner.*
-import stui.core.buffer.{Buffer, Cell, GlyphWidth}
+import stui.core.buffer.{Buffer, Cell, GlyphSymbol, GlyphWidth}
 import stui.testkit.Assertions
 import stui.testkit.gen.BufferGens
 import stui.testkit.gen.BufferGens.CanvasOp
@@ -12,7 +12,7 @@ import stui.unicode.internal.IntOps.*
 
 import scala.annotation.tailrec
 
-/** The buffer laws: the cell invariant, draw identity, clipping, and rendered row widths.
+/** The buffer laws: the cell invariant (the glyph symbol round trip included), draw identity, clipping, and rendered row widths.
   *
   * @author Kevin Lee
   * @since 2026-08-23
@@ -28,11 +28,12 @@ object BufferLaws {
       if (cp >= 0xd800 && cp <= 0xdfff) true else hasUnpairedSurrogate(s, i + Character.charCount(cp))
     }
 
-  private def glyphChecks(buffer: Buffer, index: Int, symbol: String, width: GlyphWidth): List[Result] = List(
-    Result.assert(symbol.nonEmpty).log(s"cell $index: empty symbol"),
-    Result.assert(Graphemes.count(symbol) === 1).log(s"cell $index: not one cluster"),
-    Result.assert(!hasUnpairedSurrogate(symbol, 0)).log(s"cell $index: unpaired surrogate"),
-    Result.assert(buffer.policy.clusterWidth(symbol) === width.columns).log(s"cell $index: width mismatch"),
+  private def glyphChecks(buffer: Buffer, index: Int, symbol: GlyphSymbol, width: GlyphWidth): List[Result] = List(
+    Result.assert(symbol.value.nonEmpty).log(s"cell $index: empty symbol"),
+    Result.assert(Graphemes.count(symbol.value) === 1).log(s"cell $index: not one cluster"),
+    Result.assert(!hasUnpairedSurrogate(symbol.value, 0)).log(s"cell $index: unpaired surrogate"),
+    Result.assert(buffer.policy.clusterWidth(symbol.value) === width.columns).log(s"cell $index: width mismatch"),
+    Result.assert(GlyphSymbol.from(symbol.value).isRight).log(s"cell $index: the symbol does not round-trip through GlyphSymbol.from"),
   )
 
   /** The [[Cell]] invariant on every cell. */

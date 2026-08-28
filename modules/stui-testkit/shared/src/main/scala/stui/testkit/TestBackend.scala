@@ -3,9 +3,10 @@ package stui.testkit
 import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
+import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, CellUpdate}
 import stui.core.geometry.{Position, Rect, Size}
-import stui.core.spi.{TerminalBackend, TerminalOptions}
+import stui.core.spi.{TerminalBackend, TerminalError, TerminalOptions}
 import stui.unicode.WidthPolicy
 
 import java.util.concurrent.atomic.AtomicReference
@@ -23,13 +24,15 @@ enum BackendCall derives Eq, Show, Hash {
   case ShowCursor
   case HideCursor
   case Clear
+  case Print(rows: Buffer)
   case Enter(options: TerminalOptions)
   case Exit
 }
 
 /** An in-memory [[TerminalBackend]] for tests (design doc 6.1, the M1d testkit deliverable): it keeps the screen a `draw` would
-  * produce (through [[Buffer.applyUpdates]]), the cursor position and visibility, the options of the last `enter`, and the ordered
-  * [[BackendCall]] log. State lives in one `AtomicReference`, so the backend works unchanged on JVM, Scala.js, and Scala Native.
+  * produce (through [[Buffer.applyUpdates]]), the cursor position and visibility, the options of the last `enter`, the scrollback of
+  * printed rows (design doc 12, asserted like Ratatui's scrollback assertions), and the ordered [[BackendCall]] log. State lives in one
+  * `AtomicReference`, so the backend works unchanged on JVM, Scala.js, and Scala Native.
   *
   * @author Kevin Lee
   * @since 2026-08-24
@@ -47,8 +50,11 @@ final class TestBackend private (private val ref: AtomicReference[TestBackend.St
       state.copy(buffer = Buffer.applyUpdates(state.buffer, updates), calls = state.calls :+ BackendCall.Draw(updates))
     ): Unit
 
-  /** Logs [[BackendCall.Flush]]. */
-  override def flush(): Unit = record(BackendCall.Flush)
+  /** Logs [[BackendCall.Flush]] and returns 0, there is no byte stream. */
+  override def flush(): NonNegInt = {
+    record(BackendCall.Flush)
+    NonNegInt(0)
+  }
 
   /** Moves the cursor and logs [[BackendCall.MoveCursor]]. */
   override def moveCursor(position: Position): Unit =
@@ -68,9 +74,15 @@ final class TestBackend private (private val ref: AtomicReference[TestBackend.St
       state.copy(buffer = Buffer.emptyWith(policy, state.buffer.area), calls = state.calls :+ BackendCall.Clear)
     ): Unit
 
-  /** Remembers the options and logs [[BackendCall.Enter]]. */
-  override def enter(options: TerminalOptions): Unit =
+  /** Appends the rows to the printed scrollback and logs [[BackendCall.Print]]. */
+  override def print(rows: Buffer): Unit =
+    ref.updateAndGet(state => state.copy(printed = state.printed :+ rows, calls = state.calls :+ BackendCall.Print(rows))): Unit
+
+  /** Remembers the options, logs [[BackendCall.Enter]], and always succeeds. */
+  override def enter(options: TerminalOptions): Either[TerminalError, Unit] = {
     ref.updateAndGet(state => state.copy(entered = options.some, calls = state.calls :+ BackendCall.Enter(options))): Unit
+    ().asRight[TerminalError]
+  }
 
   /** Forgets the entered options and logs [[BackendCall.Exit]]. */
   override def exit(): Unit =
@@ -88,6 +100,7 @@ object TestBackend {
     cursor: Position,
     cursorVisible: Boolean,
     entered: Option[TerminalOptions],
+    printed: Vector[Buffer],
     calls: Vector[BackendCall],
   )
 
@@ -98,7 +111,14 @@ object TestBackend {
   def ofWith(policy: WidthPolicy, size: Size): TestBackend =
     new TestBackend(
       new AtomicReference(
-        State(Buffer.emptyWith(policy, Rect.sized(size)), Position.origin, false, none[TerminalOptions], Vector.empty[BackendCall])
+        State(
+          Buffer.emptyWith(policy, Rect.sized(size)),
+          Position.origin,
+          false,
+          none[TerminalOptions],
+          Vector.empty[Buffer],
+          Vector.empty[BackendCall],
+        )
       ),
       policy,
     )
@@ -122,6 +142,9 @@ object TestBackend {
 
     /** The options of the last `enter`, `None` before it and after `exit`. */
     def entered: Option[TerminalOptions] = backend.state.entered
+
+    /** The rows every `print` emitted, in order (the scrollback). */
+    def printed: Vector[Buffer] = backend.state.printed
 
     /** The test harness resize: a blank screen of the new size, the cursor kept, nothing logged (a real resize reaches the render
       * loop as an event, not as a backend call).

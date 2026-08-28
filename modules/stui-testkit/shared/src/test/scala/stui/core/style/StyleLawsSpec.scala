@@ -25,7 +25,29 @@ object StyleLawsSpec extends Properties {
       "toStyle applied to the default gives the cell style back",
       StyleGens.cellStyle.forAll.map(cs => Assertions.eqv(CellStyle.default.patch(cs.toStyle), cs)),
     ),
+    property("toStyle applied to any cell style gives the cell style back", testToStyleReplaces),
+    example(
+      "an underline patch sets the style",
+      Assertions.eqv(CellStyle.default.patch(Style.empty.withUnderline(UnderlineStyle.Curly)).underline, UnderlineStyle.Curly),
+    ),
+    example(
+      "UnderlineStyle.None in a patch turns the underline off",
+      Assertions.eqv(
+        CellStyle.default.patch(Style.empty.withUnderline(UnderlineStyle.Curly)).patch(Style.empty.notUnderlined).underline,
+        UnderlineStyle.None,
+      ),
+    ),
+    example(
+      "a later underline patch wins in Style.patch",
+      Assertions.eqv(Style.empty.underlined.patch(Style.empty.notUnderlined).underline, Some(UnderlineStyle.None)),
+    ),
   )
+
+  def testToStyleReplaces: Property =
+    for {
+      any <- StyleGens.cellStyle.forAll
+      cs  <- StyleGens.cellStyle.forAll
+    } yield Assertions.eqv(any.patch(cs.toStyle), cs)
 
   def testAction: Property =
     for {

@@ -4,6 +4,7 @@ import hedgehog.*
 import hedgehog.runner.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, Canvas}
+import stui.core.frame.RegionId
 import stui.core.geometry.{Rect, Size}
 import stui.core.style.Style
 import stui.testkit.Assertions
@@ -37,6 +38,18 @@ object WidgetContractSpec extends Properties {
     }
   }
 
+  /** Draws nothing, records its cursor at the area's origin and the whole area as a region (nothing on an empty area). */
+  final case class CaretWidget(id: RegionId) extends Widget {
+    /* the method lives in the class body because it implements the Widget trait member */
+    override def render(area: Rect, canvas: Canvas): Unit =
+      if (area.isEmpty) {
+        ()
+      } else {
+        canvas.cursor(area.position)
+        canvas.region(id, area)
+      }
+  }
+
   private val outer: Rect = Rect(NonNegInt(0), NonNegInt(0), NonNegInt(24), NonNegInt(10))
 
   private val fillWidgets: Gen[Widget] =
@@ -44,6 +57,8 @@ object WidgetContractSpec extends Properties {
       symbol <- Gen.frequency1(3 -> Gens.asciiPrintableChar.map(_.toString), 1 -> NastyGens.wideCluster)
       style  <- StyleGens.style
     } yield (FillWidget(symbol, style): Widget)
+
+  private val caretWidgets: Gen[Widget] = Gen.element1("caret", "prompt").map(id => CaretWidget(RegionId(id)): Widget)
 
   private val clampInputs: Gen[(StatefulWidget[Int], Int)] =
     for {
@@ -53,6 +68,7 @@ object WidgetContractSpec extends Properties {
 
   override def tests: List[Test] =
     WidgetLaws.laws("fill widget", fillWidgets, outer) ++
+      WidgetLaws.laws("caret widget", caretWidgets, outer) ++
       WidgetLaws.stateLaw("clamp widget", clampInputs, outer) ++
       List(example("an area hanging off the canvas paints only the intersection", testClipped))
 

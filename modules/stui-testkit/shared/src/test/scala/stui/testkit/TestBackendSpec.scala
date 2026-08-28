@@ -6,7 +6,7 @@ import hedgehog.runner.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.Buffer
 import stui.core.geometry.{Position, Size}
-import stui.core.spi.{TerminalFeature, TerminalOptions}
+import stui.core.spi.{TerminalError, TerminalFeature, TerminalOptions}
 import stui.testkit.TestBackend.*
 
 /** The in-memory backend: the screen follows the draws, the call log keeps the order, and the harness resize is silent.
@@ -23,6 +23,7 @@ object TestBackendSpec extends Properties {
     example("cursor calls update the state", testCursor),
     example("clear blanks the screen", testClear),
     example("resize blanks and resizes without logging", testResize),
+    example("print appends to the scrollback and logs", testPrint),
   )
 
   def testDrawAndLog: Result = {
@@ -31,14 +32,16 @@ object TestBackendSpec extends Properties {
     val hallo   = Buffer.fromLines(Vector("hallo"))
     val first   = Buffer.diff(Buffer.empty(hello.area), hello)
     val second  = Buffer.diff(hello, hallo)
-    val options = TerminalOptions.of(TerminalFeature.AlternateScreen)
-    backend.enter(options)
+    val options = TerminalOptions.alternateScreen.withFeature(TerminalFeature.MouseCapture)
+    val entered = backend.enter(options)
     backend.draw(first)
     backend.draw(second)
-    backend.flush()
+    val flushed = backend.flush()
     backend.exit()
     Result.all(
       List(
+        Assertions.eqv(entered, ().asRight[TerminalError]),
+        Assertions.eqv(flushed, NonNegInt(0)),
         Assertions.grid(backend.screen, Vector("hallo")),
         Assertions.eqv(
           backend.calls,
@@ -93,6 +96,19 @@ object TestBackendSpec extends Properties {
         Assertions.eqv(backend.size(), sized(4, 2)),
         Assertions.grid(backend.screen, Vector("    ", "    ")),
         Assertions.eqv(backend.calls.length, 1),
+      )
+    )
+  }
+
+  def testPrint: Result = {
+    val backend = TestBackend.of(sized(3, 1))
+    val rows    = Buffer.fromLines(Vector("ab", "c"))
+    backend.print(rows)
+    Result.all(
+      List(
+        Assertions.eqv(backend.printed, Vector(rows)),
+        Assertions.eqv(backend.calls, Vector(BackendCall.Print(rows))),
+        Assertions.grid(backend.screen, Vector("   ")),
       )
     )
   }

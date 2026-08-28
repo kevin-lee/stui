@@ -4,13 +4,15 @@ import cats.{Eq, Show}
 import cats.syntax.all.*
 import hedgehog.{Gen, Range, Result}
 import hedgehog.runner.*
+import stui.core.frame.Frame
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.widget.{StatefulWidget, Widget}
 import stui.testkit.{Assertions, Rendering}
 import stui.testkit.gen.{BufferGens, GeometryGens}
 
-/** The widget contract laws (design doc 6.4): a widget draws only inside its area, deterministically, and totally, and a stateful
-  * widget's returned state is a fixed point. Run these on small `outer` rects only, the inside-area law walks every cell.
+/** The widget contract laws (design doc 6.4): a widget draws only inside its area, deterministically, and totally, records its cursor
+  * and regions inside its area, and a stateful widget's returned state is a fixed point. Run these on small `outer` rects only, the
+  * inside-area law walks every cell.
   *
   * @author Kevin Lee
   * @since 2026-08-24
@@ -37,6 +39,25 @@ object WidgetLaws {
 
   /** The stateless laws for any widget generator over a small `outer` rect. */
   def laws(name: String, widgets: Gen[Widget], outer: Rect): List[Test] = List(
+    property(
+      s"[$name] the recorded cursor and every region lie inside the area",
+      for {
+        widget <- widgets.forAll
+        area   <- GeometryGens.rectWithin(outer).forAll
+        ops    <- BufferGens.ops(outer, Range.linear(0, 5)).forAll
+      } yield {
+        val base  = BufferGens.bufferFrom(outer, ops)
+        val frame = Frame.draw(base)(canvas => widget.render(area, canvas))
+        Result.all(
+          Result.assert(frame.cursor.forall(area.contains)).log(s"cursor ${frame.cursor.show} outside ${area.show}") ::
+            frame
+              .regions
+              .entries
+              .toList
+              .map(region => Result.assert(GeometryLaws.contained(region.rect, area)).log(s"region ${region.show} outside ${area.show}"))
+        )
+      },
+    ),
     property(
       s"[$name] a widget renders only inside its area (modulo the one-cell edge repair)",
       for {

@@ -29,7 +29,7 @@ object CanvasFixturesSpec extends Properties {
 
   private val blueBg: Style = Style.empty.withBg(Color.Blue)
 
-  private def glyph(symbol: String): Cell = Cell.glyph(symbol, GlyphWidth.One, CellStyle.default)
+  private def glyph(symbol: String): Cell = Cell.glyph(GlyphSymbol.unsafeFrom(symbol), GlyphWidth.One, CellStyle.default)
 
   private def cellsOf(buffer: Buffer): Vector[Cell] = buffer.cells.toVector
 
@@ -73,7 +73,12 @@ object CanvasFixturesSpec extends Properties {
     }
     Assertions.eqv(
       cellsOf(buffer),
-      Vector(Cell.glyph(ko, GlyphWidth.Two, CellStyle.default), Cell.continuation(CellStyle.default), Cell.blank, Cell.blank),
+      Vector(
+        Cell.glyph(GlyphSymbol.unsafeFrom(ko), GlyphWidth.Two, CellStyle.default),
+        Cell.continuation(CellStyle.default),
+        Cell.blank,
+        Cell.blank,
+      ),
     )
   }
 
