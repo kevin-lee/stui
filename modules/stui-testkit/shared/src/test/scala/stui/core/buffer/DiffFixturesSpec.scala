@@ -64,7 +64,10 @@ object DiffFixturesSpec extends Properties {
   def testSingleChange: Result = {
     val updates = Buffer.diff(Buffer.fromLines(Vector("hello")), Buffer.fromLines(Vector("hallo")))
     Result.all(
-      List(Assertions.eqv(updates.map(_.position), Vector(at(1, 0))), Assertions.eqv(updates.map(_.cell.symbolOption), Vector("a".some)))
+      List(
+        Assertions.eqv(updates.map(_.position), Vector(at(1, 0))),
+        Assertions.eqv(updates.map(_.cell.symbolOption.map(_.value)), Vector("a".some)),
+      )
     )
   }
 
@@ -109,7 +112,7 @@ object DiffFixturesSpec extends Properties {
           .assert(updates.exists(update => update.position === at(2, 0) && update.cell.symbolOption.isEmpty))
           .log("column 2 is a continuation"),
         Result
-          .assert(updates.exists(update => update.position === at(1, 0) && update.cell.symbolOption === hao.some))
+          .assert(updates.exists(update => update.position === at(1, 0) && update.cell.symbolOption.map(_.value) === hao.some))
           .log("column 1 is the wide glyph"),
       )
     )

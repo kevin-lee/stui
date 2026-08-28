@@ -5,9 +5,9 @@ import cats.derived.strict.*
 import cats.syntax.all.*
 import stui.core.style.CellStyle
 
-/** One cell of a [[Buffer]]: a glyph (exactly one extended grapheme cluster of valid UTF-16 whose width under the buffer's policy is
-  * `width.columns`) or the continuation column of a two-column glyph, carrying that glyph's style because the terminal paints the column
-  * with it.
+/** One cell of a [[Buffer]]: a glyph (a [[GlyphSymbol]], exactly one extended grapheme cluster of valid UTF-16, whose width under the
+  * buffer's policy is `width.columns`) or the continuation column of a two-column glyph, carrying that glyph's style because the terminal
+  * paints the column with it. The symbol type makes "a cell never holds a control" true by construction (decision D14).
   *
   * Invariant of every well-formed buffer: a `Glyph` of width `Two` is immediately followed in its row by a `Continuation` with the same
   * style, and every `Continuation` is immediately preceded by such a glyph. The [[Canvas]] maintains it on every write.
@@ -16,20 +16,20 @@ import stui.core.style.CellStyle
   * @since 2026-08-23
   */
 enum Cell derives Eq, Show, Hash {
-  case Glyph(symbol: String, width: GlyphWidth, style: CellStyle)
+  case Glyph(symbol: GlyphSymbol, width: GlyphWidth, style: CellStyle)
   case Continuation(style: CellStyle)
 }
 
 object Cell {
 
   /** A space with the default style. */
-  val blank: Cell = Glyph(" ", GlyphWidth.One, CellStyle.default)
+  val blank: Cell = Glyph(GlyphSymbol.space, GlyphWidth.One, CellStyle.default)
 
   /** A space with the given style. */
-  def blankWith(style: CellStyle): Cell = Glyph(" ", GlyphWidth.One, style)
+  def blankWith(style: CellStyle): Cell = Glyph(GlyphSymbol.space, GlyphWidth.One, style)
 
   /** A [[Glyph]] cell. */
-  def glyph(symbol: String, width: GlyphWidth, style: CellStyle): Cell = Glyph(symbol, width, style)
+  def glyph(symbol: GlyphSymbol, width: GlyphWidth, style: CellStyle): Cell = Glyph(symbol, width, style)
 
   /** A [[Continuation]] cell. */
   def continuation(style: CellStyle): Cell = Continuation(style)
@@ -50,14 +50,14 @@ object Cell {
 
     /** True for a glyph whose symbol is a space. */
     def isBlank: Boolean = cell match {
-      case Glyph(symbol, _, _) => symbol === " "
+      case Glyph(symbol, _, _) => symbol === GlyphSymbol.space
       case Continuation(_) => false
     }
 
     /** The glyph's symbol, `None` for a continuation. */
-    def symbolOption: Option[String] = cell match {
+    def symbolOption: Option[GlyphSymbol] = cell match {
       case Glyph(symbol, _, _) => symbol.some
-      case Continuation(_) => none[String]
+      case Continuation(_) => none[GlyphSymbol]
     }
 
   }

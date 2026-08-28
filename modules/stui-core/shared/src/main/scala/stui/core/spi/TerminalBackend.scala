@@ -1,6 +1,7 @@
 package stui.core.spi
 
-import stui.core.buffer.CellUpdate
+import refined4s.types.numeric.NonNegInt
+import stui.core.buffer.{Buffer, CellUpdate}
 import stui.core.geometry.{Position, Size}
 
 /** What a platform backend provides to the rendering loop (design doc 6.3). Synchronous and effect-free, the effect adapters lift it.
@@ -18,8 +19,10 @@ trait TerminalBackend {
     */
   def draw(updates: Vector[CellUpdate]): Unit
 
-  /** Pushes buffered output to the terminal. */
-  def flush(): Unit
+  /** Pushes buffered output to the terminal and returns the number of bytes pushed by this call (0 for a backend without a byte
+    * stream). The orchestration reports it as `RenderStats.bytes`.
+    */
+  def flush(): NonNegInt
 
   /** Moves the cursor to the position. */
   def moveCursor(position: Position): Unit
@@ -33,10 +36,18 @@ trait TerminalBackend {
   /** Clears the whole screen. */
   def clear(): Unit
 
-  /** Enters raw mode and the requested features, restored by [[exit]]. */
-  def enter(options: TerminalOptions): Unit
+  /** Emits rows above the viewport into scrollback in inline mode (M1f). Under the alternate screen the orchestration buffers prints
+    * instead and calls this only when flushing the transcript after restore (M1f). The M1e writer emits the rows as styled lines with
+    * CR LF at the cursor.
+    */
+  def print(rows: Buffer): Unit
 
-  /** Restores everything [[enter]] changed. Idempotent, runs on every exit path. */
+  /** Enters raw mode, the screen mode, and the requested features, restored by [[exit]]. `Left` when standard input is not a terminal,
+    * the screen mode is unsupported, or a platform call fails, in which case nothing was changed.
+    */
+  def enter(options: TerminalOptions): Either[TerminalError, Unit]
+
+  /** Restores everything [[enter]] changed and discards any output not yet flushed. Idempotent, runs on every exit path. */
   def exit(): Unit
 
 }

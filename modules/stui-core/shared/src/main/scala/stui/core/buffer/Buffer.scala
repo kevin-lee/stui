@@ -1,15 +1,17 @@
 package stui.core.buffer
 
-import cats.{Eq, Show}
+import cats.{Hash, Show}
 import cats.syntax.all.*
 import extras.render.Render
 import refined4s.types.numeric.NonNegInt
+import stui.core.frame.{Region, Regions}
 import stui.core.geometry.{Position, Rect}
 import stui.core.internal.NonNegInts
 import stui.core.style.Style
 import stui.unicode.WidthPolicy
 import stui.unicode.internal.IntOps.*
 
+import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.tailrec
 
 /** An immutable grid of [[Cell]]s over `area` (row-major, `cells.length == area.area`) with the [[WidthPolicy]] that measured its glyphs.
@@ -55,12 +57,13 @@ object Buffer {
   private def cellCount(area: Rect): Int = math.min(area.area, Int.MaxValue.toLong).toInt
 
   /** The cells of `next` that differ from `prev`, in row-major order with strictly increasing index. When the areas differ every cell of
-    * `next` is an update (a resize is a full redraw).
+    * `next` is an update (a resize is a full redraw, [[allUpdates]]).
     */
   def diff(prev: Buffer, next: Buffer): Vector[CellUpdate] =
-    if (prev.area =!= next.area) allCells(next) else diffLoop(prev, next, 0, Vector.empty[CellUpdate])
+    if (prev.area =!= next.area) allUpdates(next) else diffLoop(prev, next, 0, Vector.empty[CellUpdate])
 
-  private def allCells(buffer: Buffer): Vector[CellUpdate] =
+  /** Every cell of the buffer as an update, in row-major order: the full redraw the orchestration emits on a `RedrawReason`. */
+  def allUpdates(buffer: Buffer): Vector[CellUpdate] =
     Vector.tabulate(buffer.cells.length)(i => CellUpdate(positionOf(buffer, i), buffer.cells(i)))
 
   @tailrec
@@ -100,6 +103,19 @@ object Buffer {
     new Buffer(base.area, base.policy, IArray.unsafeFromArray(copy))
   }
 
+  /** [[Buffer.draw]] that also returns the cursor and the regions the canvas recorded (the `Frame.draw` mechanism). */
+  private[core] def drawRecording(buffer: Buffer)(f: Canvas => Unit): (Buffer, Option[Position], Regions) = {
+    val copy       = Array.tabulate(buffer.cells.length)(i => buffer.cells(i))
+    val open       = Array(true)
+    val cursorRef  = new AtomicReference(none[Position])
+    val regionsRef = new AtomicReference(Vector.empty[Region])
+    val canvas     = new Canvas(buffer.area, buffer.policy, copy, open, cursorRef, regionsRef)
+    f(canvas)
+    open(0) = false
+    /* the canvas is closed, so nothing can reach the array again */
+    (new Buffer(buffer.area, buffer.policy, IArray.unsafeFromArray(copy)), canvas.recordedCursor, Regions(canvas.recordedRegions))
+  }
+
   /** One `String` per row: the glyph symbols concatenated, continuations skipped, so each row's display width is the area width. */
   def renderRows(buffer: Buffer): Vector[String] = {
     val w = buffer.area.width.value
@@ -112,15 +128,22 @@ object Buffer {
       builder.toString
     } else {
       val next = cells(i) match {
-        case Cell.Glyph(symbol, _, _) => builder.append(symbol)
+        case Cell.Glyph(symbol, _, _) => builder.append(symbol.value)
         case Cell.Continuation(_) => builder
       }
       renderRow(cells, i + 1, end, next)
     }
 
-  /** Area and cells, the policy is ignored. */
-  given eq: Eq[Buffer] =
-    Eq.instance((a, b) => a.area === b.area && a.cells.length === b.cells.length && sameCells(a.cells, b.cells, 0))
+  /** Area and cells, the policy is ignored. Also the `Eq`. */
+  given hash: Hash[Buffer] = new Hash[Buffer] {
+    override def hash(buffer: Buffer): Int          = hashCells(buffer.cells, 0, 31 * buffer.area.hash)
+    override def eqv(a: Buffer, b: Buffer): Boolean =
+      a.area === b.area && a.cells.length === b.cells.length && sameCells(a.cells, b.cells, 0)
+  }
+
+  @tailrec
+  private def hashCells(cells: IArray[Cell], i: Int, acc: Int): Int =
+    if (i >= cells.length) acc else hashCells(cells, i + 1, 31 * acc + cells(i).hash)
 
   @tailrec
   private def sameCells(a: IArray[Cell], b: IArray[Cell], i: Int): Boolean =
@@ -139,16 +162,12 @@ object Buffer {
       Option.when(buffer.area.contains(position))(buffer.cells(indexOf(buffer, position)))
 
     /** Copies the cells, opens a [[Canvas]] on the copy, runs `f`, closes the canvas (so a leaked canvas is inert), and returns the new
-      * buffer.
+      * buffer. The cursor and regions the canvas recorded are discarded (`Frame.draw` keeps them).
       */
-    def draw(f: Canvas => Unit): Buffer = {
-      val copy = Array.tabulate(buffer.cells.length)(i => buffer.cells(i))
-      val open = Array(true)
-      f(new Canvas(buffer.area, buffer.policy, copy, open))
-      open(0) = false
-      /* the canvas is closed, so nothing can reach the array again */
-      new Buffer(buffer.area, buffer.policy, IArray.unsafeFromArray(copy))
-    }
+    def draw(f: Canvas => Unit): Buffer =
+      drawRecording(buffer)(f) match {
+        case (drawn, _, _) => drawn
+      }
 
     /** The cells row by row. */
     def rows: Vector[Vector[Cell]] = {

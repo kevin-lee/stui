@@ -105,7 +105,16 @@ lazy val examples       = module("examples", crossProject(JVMPlatform, NativePla
   .settings(noPublish)
   .settings(noDoc)
   .dependsOn(widgets, terminal)
-lazy val examplesJvm    = examples.jvm
+/* The demo owns the terminal, so it must run in its own process with standard input connected (an in-process `run` shares sbt's
+ * standard input). Alternative launches: `java -cp` over `sbt "export examplesJVM/Runtime/fullClasspath"`, and for Native
+ * `sbt examplesNative/nativeLink` then `modules/examples/native/target/scala-3.3.8/examples`. */
+lazy val examplesJvm    = examples
+  .jvm
+  .settings(
+    run / fork           := true,
+    run / connectInput   := true,
+    run / outputStrategy := Some(StdoutOutput),
+  )
 lazy val examplesNative = examples.native.settings(nativeSettings)
 
 lazy val props =

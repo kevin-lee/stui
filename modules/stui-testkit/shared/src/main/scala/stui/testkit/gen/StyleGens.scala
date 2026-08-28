@@ -1,7 +1,7 @@
 package stui.testkit.gen
 
 import hedgehog.{Gen, Range}
-import stui.core.style.{CellStyle, Color, Modifier, Modifiers, Style}
+import stui.core.style.{CellStyle, Color, Modifier, Modifiers, Style, UnderlineStyle}
 
 /** Generators for colours, modifiers, and styles.
   *
@@ -52,7 +52,10 @@ object StyleGens {
   val modifier: Gen[Modifier] = Gen.elementUnsafe(Modifier.all)
 
   /** A random subset. */
-  val modifiers: Gen[Modifiers] = modifier.list(Range.linear(0, 9)).map(Modifiers.of)
+  val modifiers: Gen[Modifiers] = modifier.list(Range.linear(0, 8)).map(Modifiers.of)
+
+  /** Any underline style, `UnderlineStyle.None` included. */
+  val underlineStyle: Gen[UnderlineStyle] = Gen.elementUnsafe(UnderlineStyle.all)
 
   /** Independent add and sub sets, so a modifier can be in both. */
   val style: Gen[Style] =
@@ -60,9 +63,10 @@ object StyleGens {
       fg  <- color.option
       bg  <- color.option
       ul  <- color.option
+      us  <- underlineStyle.option
       add <- modifiers
       sub <- modifiers
-    } yield Style(fg, bg, ul, add, sub)
+    } yield Style(fg, bg, ul, us, add, sub)
 
   /** Any resolved cell style. */
   val cellStyle: Gen[CellStyle] =
@@ -70,7 +74,8 @@ object StyleGens {
       fg <- color
       bg <- color
       ul <- color
+      us <- underlineStyle
       ms <- modifiers
-    } yield CellStyle(fg, bg, ul, ms)
+    } yield CellStyle(fg, bg, ul, us, ms)
 
 }

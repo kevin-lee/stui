@@ -114,7 +114,7 @@ object BlockGoldensSpec extends Properties {
         Assertions.eqv(buffer.cell(at(1, 1)).map(cell => cell.style.bg), Option[Color](Color.Blue)),
         Assertions.eqv(buffer.cell(at(0, 0)).map(cell => cell.style.fg), Option[Color](Color.Red)),
         Assertions.eqv(buffer.cell(at(0, 0)).map(cell => cell.style.bg), Option[Color](Color.Blue)),
-        Assertions.eqv(buffer.cell(at(0, 0)).flatMap(Cell.symbolOption(_)), Option[String]("┌")),
+        Assertions.eqv(buffer.cell(at(0, 0)).flatMap(_.symbolOption).map(_.value), Option[String]("┌")),
       )
     )
   }

@@ -3,12 +3,13 @@ package stui.core.internal
 import refined4s.types.numeric.NonNegInt
 
 /** Total arithmetic on `NonNegInt` for the geometry algebra: every operation is evaluated in `Long`, then clamped into
-  * `0..Int.MaxValue` (floored at 0, saturated at `Int.MaxValue`).
+  * `0..Int.MaxValue` (floored at 0, saturated at `Int.MaxValue`). Shared by every stui module for counts and coordinates that are
+  * non-negative by construction.
   *
   * @author Kevin Lee
   * @since 2026-08-23
   */
-private[core] object NonNegInts {
+private[stui] object NonNegInts {
 
   private val MaxValue: Long = Int.MaxValue.toLong
 
