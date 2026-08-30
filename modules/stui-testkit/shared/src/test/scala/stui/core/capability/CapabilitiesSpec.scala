@@ -72,6 +72,24 @@ object CapabilitiesSpec extends Properties {
       "lossless keeps everything else conservative",
       Assertions.eqv(Capabilities.lossless.copy(colors = ColorProfile.Ansi16, extendedUnderline = false), conservative),
     ),
+    example(
+      "an ambiguous-wide terminal selects ASCII glyphs",
+      Assertions.eqv(conservative.copy(ambiguousWide = true).effectiveGlyphs, GlyphSet.Ascii),
+    ),
+    example(
+      "a narrow-ambiguous terminal keeps its detected glyphs",
+      Assertions.eqv(conservative.effectiveGlyphs, GlyphSet.Unicode),
+    ),
+    example(
+      "ASCII glyphs stay ASCII either way",
+      Assertions.eqv(conservative.copy(glyphs = GlyphSet.Ascii, ambiguousWide = true).effectiveGlyphs, GlyphSet.Ascii),
+    ),
+    property(
+      "effectiveGlyphs is ASCII exactly when ambiguous-wide or detected ASCII",
+      CapabilityGens.capabilities.forAll.map { c =>
+        Assertions.eqv(c.effectiveGlyphs, if (c.ambiguousWide) GlyphSet.Ascii else c.glyphs)
+      },
+    ),
   )
 
   def testDumb: Result = {

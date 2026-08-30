@@ -48,6 +48,13 @@ object BlockGoldensSpec extends Properties {
       ),
     ),
     example(
+      "an ascii bordered box",
+      Assertions.grid(
+        Rendering.widget(Block.bordered.withBorderSet(BorderSet.ascii), size(10, 3)),
+        Vector("+--------+", "|        |", "+--------+"),
+      ),
+    ),
+    example(
       "a left title",
       Assertions.grid(
         Rendering.widget(Block.bordered.withTitle(Line.raw("Hi")), size(10, 3)),

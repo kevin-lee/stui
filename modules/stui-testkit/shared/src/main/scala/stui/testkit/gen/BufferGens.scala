@@ -27,6 +27,7 @@ object BufferGens {
     case PutLine(position: Position, line: Line, maxWidth: NonNegInt)
     case Cursor(position: Position)
     case Region(id: RegionId, rect: Rect)
+    case CopyFrom(source: Buffer, from: Position, to: Rect)
   }
 
   /** Replays one operation on the canvas. */
@@ -39,6 +40,7 @@ object BufferGens {
     case CanvasOp.PutLine(position, line, maxWidth) => canvas.putLine(position, line, maxWidth)
     case CanvasOp.Cursor(position) => canvas.cursor(position)
     case CanvasOp.Region(id, rect) => canvas.region(id, rect)
+    case CanvasOp.CopyFrom(source, from, to) => canvas.copyFrom(source, from, to)
   }
 
   /** Replays the operations in order. */
@@ -119,7 +121,36 @@ object BufferGens {
     1 -> putLineOp(positionNear(area)),
     1 -> positionNear(area).map(CanvasOp.Cursor(_)),
     1 -> regionOp(rectNear(area)),
+    1 -> copyFromOp(rectNear(area)),
   )
+
+  /** One operation aimed mostly inside the area, never a [[CanvasOp.CopyFrom]] (the copy sources are built from these, one level
+    * deep, so the generators never recurse).
+    */
+  private def plainOp(area: Rect): Gen[CanvasOp] = Gen.frequency1(
+    4 -> putStringOp(positionNear(area)),
+    1 -> putStringMaxOp(positionNear(area)),
+    2 -> fillOp(rectNear(area)),
+    1 -> rectNear(area).map(CanvasOp.Clear(_)),
+    2 -> patchStyleOp(rectNear(area)),
+    1 -> putLineOp(positionNear(area)),
+    1 -> positionNear(area).map(CanvasOp.Cursor(_)),
+    1 -> regionOp(rectNear(area)),
+  )
+
+  /** Small source buffers for [[CanvasOp.CopyFrom]], built from [[plainOp]] sequences only. */
+  private val plainSource: Gen[Buffer] =
+    for {
+      a  <- area
+      os <- plainOp(a).list(Range.linear(0, 5))
+    } yield bufferFrom(a, os)
+
+  private def copyFromOp(targets: Gen[Rect]): Gen[CanvasOp] =
+    for {
+      source <- plainSource
+      from   <- positionNear(source.area)
+      to     <- targets
+    } yield CanvasOp.CopyFrom(source, from, to)
 
   /** Operations whose positions and rects lie outside the area. */
   def outsideOp(area: Rect): Gen[CanvasOp] = Gen.frequency1(
@@ -131,6 +162,7 @@ object BufferGens {
     1 -> putLineOp(rectOutside(area).map(_.position)),
     1 -> rectOutside(area).map(rect => CanvasOp.Cursor(rect.position)),
     1 -> regionOp(rectOutside(area)),
+    1 -> copyFromOp(rectOutside(area)),
   )
 
   private def putStringOp(positions: Gen[Position]): Gen[CanvasOp] =
