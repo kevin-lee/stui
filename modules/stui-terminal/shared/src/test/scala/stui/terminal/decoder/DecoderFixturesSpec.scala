@@ -19,8 +19,15 @@ object DecoderFixturesSpec extends Properties {
   private val Replacement: Char = '�'
 
   private def decode(inputs: DecoderInput*): Vector[Event] = Decoder.stepAll(DecoderState.initial, inputs.toVector) match {
-    case (_, events) => events
+    case Decoded(_, events, _) => events
   }
+
+  private def replies(inputs: DecoderInput*): Vector[Reply] = Decoder.stepAll(DecoderState.initial, inputs.toVector) match {
+    case Decoded(_, _, answered) => answered
+  }
+
+  private def replyRow(name: String, expected: Vector[Reply], inputs: DecoderInput*): Test =
+    example(name, Assertions.eqv(replies(inputs*), expected))
 
   private def bytes(values: Int*): DecoderInput = DecoderInput.bytesOfInts(values*)
 
@@ -121,10 +128,46 @@ object DecoderFixturesSpec extends Properties {
     row("an ESC-terminated OSC followed by [A decodes as Up", Vector(key(KeyCode.Up)), esc("]0;title" + EscText + "[A")),
     example(
       "the state returns to ground after an over-long sequence",
-      Assertions.eqv(Decoder.step(DecoderState.initial, esc("[" + "1;" * 150 + "A"))._1, DecoderState.initial),
+      Assertions.eqv(Decoder.step(DecoderState.initial, esc("[" + "1;" * 150 + "A")).state, DecoderState.initial),
     ),
-    example("awaiting after ESC", Result.assert(Decoder.step(DecoderState.initial, esc(""))._1.awaiting)),
-    example("not awaiting inside a paste", Result.assert(!Decoder.step(DecoderState.initial, esc("[200~he"))._1.awaiting)),
+    example("awaiting after ESC", Result.assert(Decoder.step(DecoderState.initial, esc("")).state.awaiting)),
+    example("not awaiting inside a paste", Result.assert(!Decoder.step(DecoderState.initial, esc("[200~he")).state.awaiting)),
+    replyRow(
+      "a DA1 reply is a primary device attributes report",
+      Vector(Reply.PrimaryDeviceAttributes(Vector(62, 22))),
+      esc("[?62;22c"),
+    ),
+    replyRow(
+      "a DA2 reply is a secondary device attributes report",
+      Vector(Reply.SecondaryDeviceAttributes(Vector(1, 10, 0))),
+      esc("[>1;10;0c"),
+    ),
+    replyRow("a DECRPM reply reports the mode", Vector(Reply.PrivateModeReport(2026, 2)), esc("[?2026;2$y")),
+    replyRow(
+      "a valid XTGETTCAP reply decodes its hex entries",
+      Vector(Reply.TermcapReply(true, Vector(Reply.TermcapEntry("RGB", Option("8"))))),
+      esc("P1+r524742=38" + EscText + "\\"),
+    ),
+    replyRow(
+      "an invalid XTGETTCAP reply keeps the names it names (the iTerm2 shape)",
+      Vector(Reply.TermcapReply(false, Vector(Reply.TermcapEntry("Tc", Option.empty[String])))),
+      esc("P0+r5463" + EscText + "\\"),
+    ),
+    replyRow(
+      "a bare valid name has no value (the Ghostty shape)",
+      Vector(Reply.TermcapReply(true, Vector(Reply.TermcapEntry("Tc", Option.empty[String])))),
+      esc("P1+r5463" + EscText + "\\"),
+    ),
+    replyRow("an XTVERSION reply carries the text", Vector(Reply.VersionReply("fake 1.0")), esc("P>|fake 1.0" + EscText + "\\")),
+    replyRow(
+      "a DCS reply split across chunks still parses",
+      Vector(Reply.TermcapReply(true, Vector(Reply.TermcapEntry("RGB", Option("8"))))),
+      esc("P1+r5247"),
+      text("42=38"),
+      text(EscText + "\\"),
+    ),
+    example("a CPR is a reply while expecting and F3 with modifiers otherwise", testCpr),
+    example("an out-of-range CPR is dropped while expecting", testCprOutOfRange),
     example(
       "the modifier parameter",
       Result.all(
@@ -135,5 +178,23 @@ object DecoderFixturesSpec extends Properties {
       ),
     ),
   )
+
+  def testCpr: Result = {
+    val expecting = Decoder.step(DecoderState.initial.expecting(true), DecoderInput.bytesOf(EscText + "[24;80R"))
+    val normal    = Decoder.step(DecoderState.initial, DecoderInput.bytesOf(EscText + "[24;80R"))
+    Result.all(
+      List(
+        Assertions.eqv(expecting.replies, Vector(Reply.CursorPosition(Position(NonNegInt(79), NonNegInt(23))))),
+        Assertions.eqv(expecting.events, Vector.empty[Event]),
+        Assertions.eqv(normal.replies, Vector.empty[Reply]),
+        Assertions.eqv(normal.events, Vector(Event.key(KeyEvent(KeyCode.f(3), Decoder.modifiersOf(80), KeyEventKind.Press)))),
+      )
+    )
+  }
+
+  def testCprOutOfRange: Result = {
+    val zero = Decoder.step(DecoderState.initial.expecting(true), DecoderInput.bytesOf(EscText + "[0;5R"))
+    Result.all(List(Assertions.eqv(zero.replies, Vector.empty[Reply]), Assertions.eqv(zero.events, Vector.empty[Event])))
+  }
 
 }

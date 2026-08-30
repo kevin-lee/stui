@@ -4,7 +4,7 @@ import cats.syntax.all.*
 import stui.core.event.Event
 import stui.core.geometry.Size
 import stui.core.spi.{BlockingEventSource, Clock, Subscription}
-import stui.terminal.decoder.{Decoder, DecoderInput, DecoderState}
+import stui.terminal.decoder.{Decoded, Decoder, DecoderInput, DecoderState}
 import stui.unicode.internal.IntOps.*
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
@@ -13,8 +13,10 @@ import scala.concurrent.duration.*
 
 /** The JVM and Native event source (design doc 7 and 7.5): raw chunks from a [[RawInput]] go through the pure decoder on the consumer's
   * side, so `poll` can arm the ESC timeout itself (a tick is fed once the timeout has elapsed since the decoder started waiting), and a
-  * resize flag set by the platform's WINCH handler becomes a `Resize` event when the size query reports a new non-zero size.
-  * `subscribe` runs one daemon thread over `poll` for the push style.
+  * resize flag set by the platform's WINCH handler becomes a `Resize` event when the size query reports a new non-zero terminal size,
+  * delivered as the effective viewport size through `viewportSize` (the D12 under-run rule: the deduplication is on the terminal size,
+  * so an origin move without a viewport size change still surfaces). The probe hands over its final decoder state and the events it
+  * decoded while waiting, so nothing typed during the probe is lost. `subscribe` runs one daemon thread over `poll` for the push style.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -23,13 +25,16 @@ final class DecodingEventSource(
   raw: RawInput,
   resized: AtomicBoolean,
   sizeQuery: () => Option[Size],
+  viewportSize: Size => Size,
   escTimeout: FiniteDuration,
   clock: Clock,
+  initialState: DecoderState,
+  initialEvents: Vector[Event],
 ) extends BlockingEventSource {
 
-  private val decoder: AtomicReference[DecoderState] = new AtomicReference(DecoderState.initial)
+  private val decoder: AtomicReference[DecoderState] = new AtomicReference(initialState)
 
-  private val pending: AtomicReference[Vector[Event]] = new AtomicReference(Vector.empty[Event])
+  private val pending: AtomicReference[Vector[Event]] = new AtomicReference(initialEvents)
 
   private val awaitingSince: AtomicLong = new AtomicLong(0L)
 
@@ -84,9 +89,10 @@ final class DecodingEventSource(
         }
     }
 
+  /* replies outside a probe window are late answers and are dropped */
   private def step(input: DecoderInput): Unit =
     Decoder.step(decoder.get(), input) match {
-      case (next, events) =>
+      case Decoded(next, events, _) =>
         decoder.set(next)
         if (next.awaiting) awaitingSince.set(clock.monotonicNanos()) else ()
         pending.updateAndGet(_ ++ events): Unit
@@ -97,7 +103,7 @@ final class DecodingEventSource(
   private def resizeEvent(): Option[Event] =
     if (resized.getAndSet(false)) {
       sizeQuery().filter(size => !size.isEmpty) match {
-        case Some(size) => if (lastSize.getAndSet(size.some) =!= size.some) Event.resize(size).some else none[Event]
+        case Some(size) => if (lastSize.getAndSet(size.some) =!= size.some) Event.resize(viewportSize(size)).some else none[Event]
         case None => none[Event]
       }
     } else {
@@ -124,5 +130,22 @@ final class DecodingEventSource(
       }
       dispatchLoop()
     }
+
+}
+
+object DecodingEventSource {
+
+  /** The `Resize` payload mapping of the D12 under-run rule: the terminal size on the alternate screen, the width with the height
+    * clamped to the requested inline height in inline mode.
+    */
+  def effectiveSize(options: stui.core.spi.TerminalOptions): Size => Size = options.screenMode match {
+    case stui.core.spi.ScreenMode.AlternateScreen => identity
+    case stui.core.spi.ScreenMode.Inline(height) =>
+      size =>
+        Size(
+          size.width,
+          stui.core.internal.NonNegInts.min(stui.core.internal.NonNegInts.clamp(height.value.toLong), size.height),
+        )
+  }
 
 }

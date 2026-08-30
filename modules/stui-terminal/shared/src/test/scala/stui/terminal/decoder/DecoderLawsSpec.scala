@@ -15,7 +15,8 @@ import stui.unicode.internal.IntOps.*
   */
 object DecoderLawsSpec extends Properties {
 
-  private val bound: Int = DecoderLimits.MaxPaste + DecoderLimits.MaxControlSequence + DecoderLimits.MaxUtf8Pending
+  private val bound: Int =
+    DecoderLimits.MaxPaste + DecoderLimits.MaxControlSequence + DecoderLimits.MaxStringSequence + DecoderLimits.MaxUtf8Pending
 
   override def tests: List[Test] = List(
     property("an encoded event decodes back to itself", testRoundTrip),
@@ -26,6 +27,7 @@ object DecoderLawsSpec extends Properties {
     property("any input sequence decodes without failure and keeps every coordinate in range", testFuzz),
     property("a tick leaves nothing awaiting outside a paste", testTick),
     property("printable text decodes to one Char per character", testText),
+    property("a cursor report never appears without the probe flag", testNoCprWithoutFlag),
   )
 
   def testRoundTrip: Property =
@@ -33,7 +35,7 @@ object DecoderLawsSpec extends Properties {
       Encoder.encode(event) match {
         case Some(bytes) =>
           Decoder.stepAll(DecoderState.initial, Vector(DecoderInput.bytes(bytes), DecoderInput.Tick)) match {
-            case (_, events) => Assertions.eqv(events, Vector(event))
+            case Decoded(_, events, _) => Assertions.eqv(events, Vector(event))
           }
         case None => Result.failure.log("not encodable")
       }
@@ -65,14 +67,14 @@ object DecoderLawsSpec extends Properties {
 
   def testBounded: Property =
     DecoderGens.inputs.forAll.map { inputs =>
-      val state = Decoder.stepAll(DecoderState.initial, inputs)._1
+      val state = Decoder.stepAll(DecoderState.initial, inputs).state
       Result.assert(state.bufferedBytes <= bound).log(s"buffered ${state.bufferedBytes.toString}")
     }
 
   def testFuzz: Property =
     DecoderGens.inputs.forAll.map { inputs =>
       Decoder.stepAll(DecoderState.initial, inputs) match {
-        case (_, events) =>
+        case Decoded(_, events, _) =>
           Result.all(events.toList.map {
             case Event.Mouse(mouse) =>
               Result.assert(mouse.position.x.value < DecoderLimits.MaxCoordinate && mouse.position.y.value < DecoderLimits.MaxCoordinate)
@@ -83,19 +85,19 @@ object DecoderLawsSpec extends Properties {
 
   def testTick: Property =
     DecoderGens.inputs.forAll.map { inputs =>
-      val before = Decoder.stepAll(DecoderState.initial, inputs)._1
-      val after  = Decoder.step(before, DecoderInput.Tick)._1
+      val before = Decoder.stepAll(DecoderState.initial, inputs).state
+      val after  = Decoder.step(before, DecoderInput.Tick).state
       after.mode match {
         case DecoderMode.Paste(_, _) => Result.success
         case DecoderMode.Ground | DecoderMode.Escape | DecoderMode.EscapeIntermediate(_) | DecoderMode.Csi(_, _) | DecoderMode.Ss3 |
-            DecoderMode.StringSeq(_, _) | DecoderMode.X10Mouse(_) =>
+            DecoderMode.StringSeq(_, _, _, _) | DecoderMode.X10Mouse(_) =>
           Result.assert(!after.awaiting).log(after.show)
       }
     }
 
   def testText: Property =
     DecoderGens.printableText.forAll.map { text =>
-      val events = Decoder.step(DecoderState.initial, DecoderInput.bytesOf(text))._2
+      val events = Decoder.step(DecoderState.initial, DecoderInput.bytesOf(text)).events
       val chars  = events.map {
         case Event.Key(KeyEvent(KeyCode.Char(c), _, _)) => c.toInt.some
         case Event.Key(_) | Event.Mouse(_) | Event.Resize(_) | Event.Paste(_) | Event.FocusGained | Event.FocusLost => none[Int]
@@ -106,6 +108,12 @@ object DecoderLawsSpec extends Properties {
           Assertions.eqv(chars, text.toVector.map(c => c.toInt.some)),
         )
       )
+    }
+
+  def testNoCprWithoutFlag: Property =
+    DecoderGens.inputs.forAll.map { inputs =>
+      val cprs = Decoder.stepAll(DecoderState.initial, inputs).replies.collect { case Reply.CursorPosition(position) => position }
+      Result.assert(cprs.isEmpty).log(cprs.show)
     }
 
 }

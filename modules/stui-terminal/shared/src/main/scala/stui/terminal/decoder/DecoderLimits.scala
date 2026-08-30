@@ -14,7 +14,9 @@ object DecoderLimits {
   /** The longest control sequence (the bytes between `CSI` and the final byte) that is decoded. */
   val MaxControlSequence: Int = 128
 
-  /** The longest string sequence (OSC, DCS, APC, PM, SOS) counted before the counter stops, the M1f reply buffer size. */
+  /** The longest string sequence (OSC, DCS, APC, PM, SOS) counted before the counter stops, and the size up to which a DCS body is
+    * buffered for the probe replies (XTGETTCAP, XTVERSION).
+    */
   val MaxStringSequence: Int = 4096
 
   /** The most paste bytes kept, one mebibyte. */

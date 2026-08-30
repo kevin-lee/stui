@@ -2,7 +2,7 @@ package stui.testkit.gen
 
 import hedgehog.{Gen, Range}
 import stui.core.buffer.GlyphWidth
-import stui.core.capability.{Capabilities, ColorProfile, GlyphSet, Multiplexer}
+import stui.core.capability.{Capabilities, CapabilitiesPatch, ColorProfile, GlyphSet, Multiplexer}
 
 /** Generators for the capabilities value and for environments `Capabilities.fromEnv` reads.
   *
@@ -40,6 +40,36 @@ object CapabilityGens {
       ambiguousWide     <- Gen.boolean
       vs16Width         <- glyphWidth
     } yield Capabilities(
+      colors,
+      syncOutput,
+      kittyKeyboard,
+      sgrMouse,
+      focusEvents,
+      scrollRegionsSafe,
+      extendedUnderline,
+      mux,
+      ssh,
+      glyphs,
+      ambiguousWide,
+      vs16Width,
+    )
+
+  /** A patch with every field independently present or absent. */
+  val capabilitiesPatch: Gen[CapabilitiesPatch] =
+    for {
+      colors            <- colorProfile.option
+      syncOutput        <- Gen.boolean.option
+      kittyKeyboard     <- Gen.boolean.option
+      sgrMouse          <- Gen.boolean.option
+      focusEvents       <- Gen.boolean.option
+      scrollRegionsSafe <- Gen.boolean.option
+      extendedUnderline <- Gen.boolean.option
+      mux               <- multiplexer.option
+      ssh               <- Gen.boolean.option
+      glyphs            <- glyphSet.option
+      ambiguousWide     <- Gen.boolean.option
+      vs16Width         <- glyphWidth.option
+    } yield CapabilitiesPatch(
       colors,
       syncOutput,
       kittyKeyboard,

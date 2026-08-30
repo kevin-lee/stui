@@ -5,6 +5,7 @@ import stui.core.buffer.Canvas
 import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifier}
 import stui.core.frame.RegionId
 import stui.core.geometry.{Position, Rect}
+import stui.core.spi.ScreenMode
 import stui.core.layout.{Constraint, Layout}
 import stui.core.style.{Color, Style, UnderlineStyle}
 import stui.core.terminal.{RedrawReason, RenderStats}
@@ -16,7 +17,7 @@ import stui.widgets.{Block, Paragraph, Wrap}
 import scala.annotation.tailrec
 import scala.concurrent.duration.*
 
-/** The M1e demo: the alternate screen with a titled header, a wrapped body of Korean, Japanese, and emoji text in rich colour, and a
+/** The stui demo: the alternate screen with a titled header, a wrapped body of Korean, Japanese, and emoji text in rich colour, and a
   * status line that shows the last event, the hit region under the mouse, the size, the render statistics, and a recorded cursor.
   * `q` or Control-C quits, `r` forces a redraw, a resize redraws, and a paste is shown.
   *
@@ -33,12 +34,13 @@ object Demo {
     frames: Int,
     paste: Option[String],
     focused: Boolean,
+    printed: Int,
   )
 
   object State {
 
     /** Nothing seen yet. */
-    val initial: State = State(none[Event], none[RegionId], none[RenderStats], 0, none[String], true)
+    val initial: State = State(none[Event], none[RegionId], none[RenderStats], 0, none[String], true, 0)
 
   }
 
@@ -91,7 +93,7 @@ object Demo {
       Span.styled("indexed 208", Style.empty.withFg(Color.indexed(208))),
     ),
     Line.raw(""),
-    Line.raw("Keys: q quits, Control-C quits, r redraws, resize the window, move the mouse over the panes, paste something."),
+    Line.raw("Keys: q quits, Control-C quits, r redraws, p and P print above the UI, resize, move the mouse, paste something."),
   )
 
   /** Renders one frame of the demo. */
@@ -105,7 +107,7 @@ object Demo {
     }
 
   private def renderHeader(session: TerminalSession, area: Rect, canvas: Canvas): Unit = {
-    val block = Block.bordered.withTitle(Line.raw(" stui M1e demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
+    val block = Block.bordered.withTitle(Line.raw(" stui M1f demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
     block.render(area, canvas)
     val caps  = session.capabilities
     val line  = Line.of(
@@ -113,6 +115,10 @@ object Demo {
       Span.raw(caps.colors.show),
       Span.styled("  ssh ", Style.empty.dim),
       Span.raw(yesNo(caps.ssh)),
+      Span.styled("  mode ", Style.empty.dim),
+      Span.raw(modeName(session)),
+      Span.styled("  sync ", Style.empty.dim),
+      Span.raw(yesNo(caps.syncOutput)),
       Span.styled("  multiplexer ", Style.empty.dim),
       Span.raw(caps.multiplexer.show),
       Span.styled("  extended underline ", Style.empty.dim),
@@ -149,6 +155,8 @@ object Demo {
       Span.raw(stats),
       Span.styled("  focus ", Style.empty.dim),
       Span.raw(yesNo(state.focused)),
+      Span.styled("  printed ", Style.empty.dim),
+      Span.raw(state.printed.toString),
       Span.styled("  paste ", Style.empty.dim),
       Span.raw(state.paste.fold("-")(_.take(20))),
     )
@@ -158,6 +166,11 @@ object Demo {
   }
 
   private def yesNo(flag: Boolean): String = if (flag) "yes" else "no"
+
+  private def modeName(session: TerminalSession): String = session.terminal.options.screenMode match {
+    case ScreenMode.AlternateScreen => "alt"
+    case ScreenMode.Inline(height) => s"inline(${height.value.toString})"
+  }
 
   /** Draws, waits for an event, and loops until `q`, Control-C, or a termination signal. Returns why it stopped. */
   @tailrec
@@ -170,6 +183,28 @@ object Demo {
       case Some(event @ Event.Key(KeyEvent(KeyCode.Char('r'), _, _))) =>
         session.terminal.redraw(RedrawReason.Requested)
         loop(session, next.copy(lastEvent = event.some))
+      case Some(event @ Event.Key(KeyEvent(KeyCode.Char('p'), _, _))) =>
+        session
+          .terminal
+          .print(
+            Line.of(
+              Span.raw(s"log ${next.printed.toString}: "),
+              Span.styled("printed above the UI", Style.empty.withFg(Color.Green)),
+              Span.raw(" 안녕하세요 · こんにちは"),
+            )
+          )
+        loop(session, next.copy(lastEvent = event.some, printed = next.printed + 1))
+      case Some(event @ Event.Key(KeyEvent(KeyCode.Char('P'), _, _))) =>
+        session
+          .terminal
+          .print(
+            Text.of(
+              Line.of(Span.styled(s"=== block ${next.printed.toString} ===", Style.empty.bold)),
+              Line.raw("a three-row paragraph printed through the cell pipeline"),
+              Line.raw("emoji: 🎉 wide: 한글"),
+            )
+          )
+        loop(session, next.copy(lastEvent = event.some, printed = next.printed + 1))
       case Some(event @ Event.Resize(_)) =>
         session.terminal.redraw(RedrawReason.Resize)
         loop(session, next.copy(lastEvent = event.some))

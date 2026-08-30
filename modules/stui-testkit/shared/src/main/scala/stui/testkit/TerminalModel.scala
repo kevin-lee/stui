@@ -4,7 +4,7 @@ import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
 import refined4s.types.numeric.NonNegInt
-import stui.core.buffer.{Buffer, Canvas, Cell, GlyphWidth}
+import stui.core.buffer.{Buffer, Canvas, Cell, CellUpdate, GlyphWidth}
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.style.{CellStyle, Color, Modifier, UnderlineStyle}
@@ -13,12 +13,16 @@ import stui.unicode.internal.IntOps.*
 
 import scala.annotation.tailrec
 
-/** The terminal-model oracle (design doc 9.3 and 12, decision D16): a pure interpreter of exactly the sequences the M1e writer emits
-  * over a screen, parameterised by a quirk profile, so `interpret(profile, Screen.of(profile, prev), present(diff(prev, next)))` must
+/** The terminal-model oracle (design doc 9.3 and 12, decision D16): a pure interpreter of exactly the sequences the writer emits over
+  * a screen, parameterised by a quirk profile, so `interpret(profile, Screen.of(profile, prev), present(diff(prev, next)))` must
   * equal `expected(profile, next)`, and any sequence outside the vocabulary is an error (the sanitisation law of principle 9). Vocabulary:
-  * printable text (segmented into clusters and written with the profile's widths under DECAWM pending wrap), CR, LF, Cursor Position,
-  * Erase in Display 2, SGR (attributes, `4:n`, the named, indexed, and RGB colours, the underline colour), and the private modes 25,
-  * 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, and 1004. M1f adds mode 2026, DECSC, DECRC, and DECSTBM.
+  * printable text (segmented into clusters and written with the profile's widths under DECAWM pending wrap), CR, LF (at the scroll
+  * region's bottom margin the region scrolls, its top row reaching the modelled scrollback only when the region starts at row one
+  * and the screen is normal, the verified xterm and kitty rule; at the screen bottom the normal screen scrolls into the scrollback
+  * while the alternate screen refuses), Cursor Position, Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
+  * `ESC 8`, restoring the cursor, the wrap flag, and the style, or homing with defaults when nothing was saved), DECSTBM with and
+  * without margins (both home the cursor, invalid margins refused), SGR (attributes, `4:n`, the named, indexed, and RGB colours, the
+  * underline colour), and the private modes 25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, and 2026.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -63,8 +67,15 @@ object TerminalModel {
   /** The policy of the profile. */
   def policyOf(profile: QuirkProfile): WidthPolicy = new ProfileWidthPolicy(profile.vs16Width)
 
+  /** The active scroll region as 0-based inclusive screen rows (the oracle's own value, top at or below bottom). */
+  final case class Region(top: NonNegInt, bottom: NonNegInt) derives Eq, Show, Hash
+
+  /** What DECSC saved: the cursor, the wrap flag, and the style. */
+  final case class SavedCursor(cursor: Position, pendingWrap: Boolean, style: CellStyle) derives Eq, Show, Hash
+
   /** The modelled terminal: the screen cells (over the profile's policy), the cursor with the DECAWM pending-wrap flag, the cursor
-    * visibility, the current SGR state, whether the alternate screen is active, and the private modes currently set.
+    * visibility, the current SGR state, whether the alternate screen is active, the private modes currently set, the scroll region,
+    * the DECSC save, and the scrollback rows that scrolled off the top of the normal screen (oldest first).
     */
   final case class Screen(
     buffer: Buffer,
@@ -74,21 +85,65 @@ object TerminalModel {
     style: CellStyle,
     alternate: Boolean,
     modes: Set[Int],
+    region: Option[Region],
+    saved: Option[SavedCursor],
+    scrollback: Vector[Vector[Cell]],
   ) derives Eq,
         Show
 
   object Screen {
 
-    /** A blank screen of the size: cursor at the origin and visible, default style, the normal screen, no mode. */
+    /** A blank screen of the size: cursor at the origin and visible, default style, the normal screen, no mode, no region, no save,
+      * an empty scrollback.
+      */
     def blank(profile: QuirkProfile, size: Size): Screen =
-      Screen(Buffer.emptyWith(policyOf(profile), Rect.sized(size)), Position.origin, false, true, CellStyle.default, false, Set.empty[Int])
+      Screen(
+        Buffer.emptyWith(policyOf(profile), Rect.sized(size)),
+        Position.origin,
+        false,
+        true,
+        CellStyle.default,
+        false,
+        Set.empty[Int],
+        none[Region],
+        none[SavedCursor],
+        Vector.empty[Vector[Cell]],
+      )
 
     /** The screen showing [[expected]] of the buffer, cursor at the origin and hidden, default style. */
     def of(profile: QuirkProfile, buffer: Buffer): Screen = ofWith(profile, identity, buffer)
 
     /** [[of]] with every style passed through `normalise` (the writer's capability normalisation). */
     def ofWith(profile: QuirkProfile, normalise: CellStyle => CellStyle, buffer: Buffer): Screen =
-      Screen(expectedWith(profile, normalise, buffer), Position.origin, false, false, CellStyle.default, false, Set.empty[Int])
+      Screen(
+        expectedWith(profile, normalise, buffer),
+        Position.origin,
+        false,
+        false,
+        CellStyle.default,
+        false,
+        Set.empty[Int],
+        none[Region],
+        none[SavedCursor],
+        Vector.empty[Vector[Cell]],
+      )
+
+    /** The screen showing `part` placed at its own area on a blank terminal of the given size, cursor at the origin and hidden (the
+      * viewport laws of the inline mode).
+      */
+    def ofTerminal(profile: QuirkProfile, normalise: CellStyle => CellStyle, terminal: Size, part: Buffer): Screen =
+      Screen(
+        placed(profile, normalise, terminal, part),
+        Position.origin,
+        false,
+        false,
+        CellStyle.default,
+        false,
+        Set.empty[Int],
+        none[Region],
+        none[SavedCursor],
+        Vector.empty[Vector[Cell]],
+      )
 
   }
 
@@ -118,7 +173,7 @@ object TerminalModel {
     Color.White,
   )
 
-  private val KnownModes: Set[Int] = Set(25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004)
+  private val KnownModes: Set[Int] = Set(25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, 2026)
 
   private val Esc: Char = '\u001b'
 
@@ -132,6 +187,14 @@ object TerminalModel {
     * profile that draws VS16 one column wide, which becomes the glyph in one column and a blank in its style in the shadow column.
     */
   def expected(profile: QuirkProfile, buffer: Buffer): Buffer = expectedWith(profile, identity, buffer)
+
+  /** `part`'s glyphs written at their absolute area positions on a blank terminal-sized buffer, every style through `normalise` (the
+    * projection the inline viewport laws compare against).
+    */
+  def placed(profile: QuirkProfile, normalise: CellStyle => CellStyle, terminal: Size, part: Buffer): Buffer =
+    Buffer
+      .emptyWith(policyOf(profile), Rect.sized(terminal))
+      .draw(canvas => expectedLoop(profile, normalise, part.cells, 0, part.area.width.value, part.area, canvas))
 
   /** [[expected]] with every style passed through `normalise`: what the terminal shows once the writer has degraded the styles to the
     * capabilities (the same function the writer uses, so the round-trip law holds for any capabilities).
@@ -190,6 +253,14 @@ object TerminalModel {
             case Left(error) => error.asLeft[Screen]
             case Right((next, updated)) => loop(profile, updated, out, next)
           }
+        } else if (i + 1 < out.length && out.charAt(i + 1) === '7') {
+          loop(profile, screen.copy(saved = SavedCursor(screen.cursor, screen.pendingWrap, screen.style).some), out, i + 2)
+        } else if (i + 1 < out.length && out.charAt(i + 1) === '8') {
+          val restored = screen.saved match {
+            case Some(saved) => screen.copy(cursor = saved.cursor, pendingWrap = saved.pendingWrap, style = saved.style)
+            case None => screen.copy(cursor = Position.origin, pendingWrap = false, style = CellStyle.default)
+          }
+          loop(profile, restored, out, i + 2)
         } else {
           ModelError.Unknown(out.substring(i, math.min(out.length, i + 2))).asLeft[Screen]
         }
@@ -219,8 +290,76 @@ object TerminalModel {
   private def lineFeed(screen: Screen): Either[ModelError, Screen] = {
     val height = screen.buffer.area.height.value
     val y      = screen.cursor.y.value
-    if (y + 1 >= height) (ModelError.Scrolled: ModelError).asLeft[Screen]
-    else screen.copy(cursor = Position(screen.cursor.x, NonNegInts.clamp(y.toLong + 1L)), pendingWrap = false).asRight[ModelError]
+    screen.region match {
+      case Some(region) if y === region.bottom.value => scrollRegionUp(screen, region).asRight[ModelError]
+      case Some(_) | None =>
+        if (y + 1 >= height) {
+          if (screen.alternate || screen.region.isDefined) {
+            (ModelError.Scrolled: ModelError).asLeft[Screen]
+          } else {
+            scrollRegionUp(screen, Region(NonNegInt(0), NonNegInts.clamp(height.toLong - 1L))).asRight[ModelError]
+          }
+        } else {
+          screen.copy(cursor = Position(screen.cursor.x, NonNegInts.clamp(y.toLong + 1L)), pendingWrap = false).asRight[ModelError]
+        }
+    }
+  }
+
+  /** The region's rows shifted up by one with a blank bottom row, the region's top row appended to the scrollback only when the
+    * region starts at row 0 on the normal screen (the verified xterm and kitty rule), the cursor kept, the wrap flag cleared.
+    */
+  private def scrollRegionUp(screen: Screen, region: Region): Screen = {
+    val rows     = screen.buffer.rows
+    val top      = region.top.value
+    val bottom   = region.bottom.value
+    val width    = screen.buffer.area.width.value
+    val blankRow = Vector.fill(width)(Cell.blank)
+    val shifted  = Vector.tabulate(rows.length) { i =>
+      if (i >= top && i < bottom) rows.lift(i + 1).getOrElse(blankRow)
+      else if (i === bottom) blankRow
+      else rows.lift(i).getOrElse(blankRow)
+    }
+    val kept     =
+      if (top === 0 && !screen.alternate) rows.lift(top).fold(screen.scrollback)(screen.scrollback :+ _) else screen.scrollback
+    screen.copy(buffer = rebuild(screen.buffer, shifted), scrollback = kept, pendingWrap = false)
+  }
+
+  private def rebuild(buffer: Buffer, rows: Vector[Vector[Cell]]): Buffer = {
+    val updates = rows.zipWithIndex.flatMap {
+      case (row, y) =>
+        row.zipWithIndex.map {
+          case (cell, x) => CellUpdate(Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)), cell)
+        }
+    }
+    Buffer.applyUpdates(Buffer.emptyWith(buffer.policy, buffer.area), updates)
+  }
+
+  /** Cells from the cursor (inclusive) to the end of the screen blanked (ED 0). */
+  private def eraseBelow(screen: Screen): Screen = {
+    val width = screen.buffer.area.width.value
+    if (width === 0) {
+      screen
+    } else {
+      val start   = screen.cursor.y.value * width + screen.cursor.x.value
+      val updates = Vector.range(start, screen.buffer.cells.length).map { j =>
+        CellUpdate(Position(NonNegInts.clamp((j % width).toLong), NonNegInts.clamp((j / width).toLong)), Cell.blank)
+      }
+      screen.copy(buffer = Buffer.applyUpdates(screen.buffer, updates))
+    }
+  }
+
+  /** Cells from the cursor (inclusive) to the end of its row blanked (EL 0). */
+  private def eraseLineEnd(screen: Screen): Screen = {
+    val width = screen.buffer.area.width.value
+    if (width === 0) {
+      screen
+    } else {
+      val y       = screen.cursor.y.value
+      val updates = Vector.range(screen.cursor.x.value, width).map { x =>
+        CellUpdate(Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)), Cell.blank)
+      }
+      screen.copy(buffer = Buffer.applyUpdates(screen.buffer, updates))
+    }
   }
 
   final private case class Placement(cluster: String, position: Position)
@@ -311,7 +450,27 @@ object TerminalModel {
     case 'H' => cup(screen, body)
     case 'J' =>
       if (body === "2") screen.copy(buffer = Buffer.emptyWith(screen.buffer.policy, screen.buffer.area)).asRight[ModelError]
+      else if (body.isEmpty || body === "0") eraseBelow(screen).asRight[ModelError]
       else unknown(body, fin)
+    case 'K' =>
+      if (body.isEmpty || body === "0") eraseLineEnd(screen).asRight[ModelError] else unknown(body, fin)
+    case 'r' =>
+      if (body.isEmpty) {
+        screen.copy(region = none[Region], cursor = Position.origin, pendingWrap = false).asRight[ModelError]
+      } else {
+        val parts = body.split(";", -1).toVector
+        (parts.lift(0).flatMap(parseNumber), parts.lift(1).flatMap(parseNumber)) match {
+          case (Some(top), Some(bottom)) if top >= 1 && top < bottom && bottom <= screen.buffer.area.height.value =>
+            screen
+              .copy(
+                region = Region(NonNegInts.clamp(top.toLong - 1L), NonNegInts.clamp(bottom.toLong - 1L)).some,
+                cursor = Position.origin,
+                pendingWrap = false,
+              )
+              .asRight[ModelError]
+          case (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) | (None, None) => unknown(body, fin)
+        }
+      }
     case 'm' => sgr(splitParams(body), screen.style).map(style => screen.copy(style = style))
     case 'h' | 'l' =>
       if (body.startsWith("?")) {

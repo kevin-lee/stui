@@ -6,7 +6,7 @@ import hedgehog.runner.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.Buffer
 import stui.core.geometry.{Position, Size}
-import stui.core.spi.{TerminalError, TerminalFeature, TerminalOptions}
+import stui.core.spi.{PrintEffect, TerminalError, TerminalFeature, TerminalOptions}
 import stui.testkit.TestBackend.*
 
 /** The in-memory backend: the screen follows the draws, the call log keeps the order, and the harness resize is silent.
@@ -23,7 +23,8 @@ object TestBackendSpec extends Properties {
     example("cursor calls update the state", testCursor),
     example("clear blanks the screen", testClear),
     example("resize blanks and resizes without logging", testResize),
-    example("print appends to the scrollback and logs", testPrint),
+    example("print appends to the scrollback, logs, and returns the configured effect", testPrint),
+    example("the viewport is the screen unless overridden", testViewport),
   )
 
   def testDrawAndLog: Result = {
@@ -102,13 +103,34 @@ object TestBackendSpec extends Properties {
 
   def testPrint: Result = {
     val backend = TestBackend.of(sized(3, 1))
+    val losing  = TestBackend.printing(PrintEffect.ViewportLost, sized(3, 1))
     val rows    = Buffer.fromLines(Vector("ab", "c"))
-    backend.print(rows)
+    val kept    = backend.print(rows)
+    val lost    = losing.print(rows)
     Result.all(
       List(
+        Assertions.eqv(kept, (PrintEffect.ViewportKept: PrintEffect)),
+        Assertions.eqv(lost, (PrintEffect.ViewportLost: PrintEffect)),
         Assertions.eqv(backend.printed, Vector(rows)),
         Assertions.eqv(backend.calls, Vector(BackendCall.Print(rows))),
         Assertions.grid(backend.screen, Vector("   ")),
+      )
+    )
+  }
+
+  def testViewport: Result = {
+    val backend = TestBackend.of(sized(5, 4))
+    val whole   = backend.viewport()
+    val inlined = stui.core.geometry.Rect(NonNegInt(0), NonNegInt(2), NonNegInt(5), NonNegInt(2))
+    backend.setViewport(inlined)
+    val set     = backend.viewport()
+    backend.clearViewport()
+    Result.all(
+      List(
+        Assertions.eqv(whole, stui.core.geometry.Rect.sized(sized(5, 4))),
+        Assertions.eqv(set, inlined),
+        Assertions.eqv(backend.viewport(), whole),
+        Assertions.eqv(backend.calls, Vector.empty[BackendCall]),
       )
     )
   }

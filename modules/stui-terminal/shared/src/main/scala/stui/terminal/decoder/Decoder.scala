@@ -10,8 +10,8 @@ import stui.unicode.internal.IntOps.*
 import java.nio.charset.StandardCharsets
 import scala.annotation.tailrec
 
-/** The pure input decoder (design doc 7.5, decision D17): `(state, input) => (state, events)` over raw bytes and clock ticks, following
-  * the DEC ANSI parser reference (Paul Flo Williams) and xterm ctlseqs.
+/** The pure input decoder (design doc 7.5, decision D17): `(state, input) => Decoded(state, events, replies)` over raw bytes and clock
+  * ticks, following the DEC ANSI parser reference (Paul Flo Williams) and xterm ctlseqs.
   *
   *   - Keys: C0 bytes (`0x0d` and `0x0a` Enter, `0x09` Tab, `0x7f` and `0x08` Backspace, `0x00` Control+Space, `0x01`-`0x1a` Control
   *     plus a letter, `0x1c`-`0x1f` Control plus `4` to `7`), printable ASCII (`A` to `Z` carry Shift), UTF-8 characters (U+FFFD for an
@@ -21,8 +21,12 @@ import scala.annotation.tailrec
   *   - Mouse: SGR 1006 (`CSI < b ; x ; y M` or `m`), X10 (`CSI M` plus three bytes), and urxvt 1015 (`CSI b ; x ; y M`), with the
   *     button, motion, and wheel bits of xterm ctlseqs, 1-based coordinates made 0-based, and reports outside `1..MaxCoordinate` dropped.
   *   - Focus (`CSI I`, `CSI O`) and bracketed paste (`CSI 200 ~` to `CSI 201 ~`, the body decoded as UTF-8 with replacement).
-  *   - Consumed without an event: OSC, DCS, APC, PM, and SOS strings to their terminator (a terminal reply can arrive fragmented), kitty
-  *     `CSI u` reports (M3), terminal replies (DA1 `CSI ? ... c`, DECRPM `CSI ... $ y`), unknown sequences, and charset designations.
+  *   - Replies (design doc 7.3): DA1 (`CSI ? ... c`), DA2 (`CSI > ... c`), DECRPM (`CSI ? Pd ; Ps $ y`), XTGETTCAP and XTVERSION
+  *     answers (DCS strings, buffered up to `DecoderLimits.MaxStringSequence` and parsed at their terminator), and, only while
+  *     `DecoderState.expectingReplies` holds, the Cursor Position Report (`CSI Pl ; Pc R`, F3 with modifiers otherwise, plan
+  *     refinement R5).
+  *   - Consumed without an event or reply: OSC, APC, PM, and SOS strings to their terminator, kitty `CSI u` reports (M3), unknown
+  *     sequences, and charset designations.
   *   - A tick resolves a lone ESC as Escape, `ESC [` as Alt+`[`, `ESC O` as Alt+Shift+`O`, a partial sequence as Escape followed by
   *     its bytes re-read as keys, an unfinished UTF-8 character as U+FFFD, and drops a partial string or X10 report.
   *
@@ -33,7 +37,9 @@ import scala.annotation.tailrec
   */
 object Decoder {
 
-  final private case class Step(state: DecoderState, events: Vector[Event], consumed: Boolean)
+  final private case class Step(state: DecoderState, events: Vector[Event], replies: Vector[Reply], consumed: Boolean)
+
+  private val NoReplies: Vector[Reply] = Vector.empty[Reply]
 
   private val Esc: Int = 0x1b
 
@@ -41,34 +47,34 @@ object Decoder {
 
   private val Del: Int = 0x7f
 
-  private val Replacement: Char = '\ufffd'
+  private val Replacement: Char = '�'
 
   private val PasteTerminator: IArray[Int] = IArray(0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e)
 
   private val TerminatorLength: Int = 6
 
-  /** The state after one input and the events it produced, in order. */
-  def step(state: DecoderState, input: DecoderInput): (DecoderState, Vector[Event]) = input match {
-    case DecoderInput.Bytes(chunk) => feed(chunk, 0, state, Vector.empty[Event])
+  /** The state after one input with the events and replies it produced, in order. */
+  def step(state: DecoderState, input: DecoderInput): Decoded = input match {
+    case DecoderInput.Bytes(chunk) => feed(chunk, 0, state, Vector.empty[Event], NoReplies)
     case DecoderInput.Tick => tick(state)
   }
 
-  /** [[step]] over every input in order, the events concatenated. */
-  def stepAll(state: DecoderState, inputs: Vector[DecoderInput]): (DecoderState, Vector[Event]) =
-    inputs.foldLeft((state, Vector.empty[Event])) {
-      case ((current, events), input) =>
+  /** [[step]] over every input in order, the events and replies concatenated. */
+  def stepAll(state: DecoderState, inputs: Vector[DecoderInput]): Decoded =
+    inputs.foldLeft(Decoded(state, Vector.empty[Event], NoReplies)) {
+      case (Decoded(current, events, replies), input) =>
         step(current, input) match {
-          case (next, produced) => (next, events ++ produced)
+          case Decoded(next, produced, answered) => Decoded(next, events ++ produced, replies ++ answered)
         }
     }
 
   @tailrec
-  private def feed(chunk: IArray[Byte], i: Int, state: DecoderState, events: Vector[Event]): (DecoderState, Vector[Event]) =
+  private def feed(chunk: IArray[Byte], i: Int, state: DecoderState, events: Vector[Event], replies: Vector[Reply]): Decoded =
     if (i >= chunk.length) {
-      (state, events)
+      Decoded(state, events, replies)
     } else {
       val step = byte(state, chunk(i).toInt & 0xff)
-      feed(chunk, if (step.consumed) i + 1 else i, step.state, events ++ step.events)
+      feed(chunk, if (step.consumed) i + 1 else i, step.state, events ++ step.events, replies ++ step.replies)
     }
 
   private def byte(state: DecoderState, b: Int): Step = state.mode match {
@@ -77,7 +83,7 @@ object Decoder {
     case EscapeIntermediate(bytes) => escapeIntermediate(state, bytes, b)
     case Csi(bytes, ignoring) => csi(state, bytes, ignoring, b)
     case Ss3 => ss3(state, b)
-    case StringSeq(escPending, length) => stringSeq(state, escPending, length, b)
+    case StringSeq(kind, escPending, length, bytes) => stringSeq(state, kind, escPending, length, bytes, b)
     case X10Mouse(bytes) => x10(state, bytes, b)
     case Paste(body, matched) => paste(state, body, matched, b)
   }
@@ -86,19 +92,19 @@ object Decoder {
     if (state.utf8Need > 0) {
       utf8Continue(state, b)
     } else if (b === Esc) {
-      Step(state.copy(mode = Escape), Vector.empty[Event], true)
+      Step(state.copy(mode = Escape), Vector.empty[Event], NoReplies, true)
     } else if (b < 0x20 || b === Del) {
-      Step(state.copy(altPending = false), Vector(control(b, state.altPending)), true)
+      Step(state.copy(altPending = false), Vector(control(b, state.altPending)), NoReplies, true)
     } else if (b < 0x80) {
-      Step(state.copy(altPending = false), Vector(printable(b.toChar, state.altPending)), true)
+      Step(state.copy(altPending = false), Vector(printable(b.toChar, state.altPending)), NoReplies, true)
     } else if (b >= 0xc2 && b <= 0xdf) {
-      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 1), Vector.empty[Event], true)
+      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 1), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0xe0 && b <= 0xef) {
-      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 2), Vector.empty[Event], true)
+      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 2), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0xf0 && b <= 0xf4) {
-      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 3), Vector.empty[Event], true)
+      Step(state.copy(utf8 = Vector(b.toByte), utf8Need = 3), Vector.empty[Event], NoReplies, true)
     } else {
-      Step(state.copy(altPending = false), Vector(printable(Replacement, state.altPending)), true)
+      Step(state.copy(altPending = false), Vector(printable(Replacement, state.altPending)), NoReplies, true)
     }
 
   private def utf8Continue(state: DecoderState, b: Int): Step =
@@ -109,13 +115,19 @@ object Decoder {
         Step(
           state.copy(utf8 = Vector.empty[Byte], utf8Need = 0, altPending = false),
           scalarEvents(decodeUtf8(bytes), state.altPending),
+          NoReplies,
           true,
         )
       } else {
-        Step(state.copy(utf8 = bytes, utf8Need = need), Vector.empty[Event], true)
+        Step(state.copy(utf8 = bytes, utf8Need = need), Vector.empty[Event], NoReplies, true)
       }
     } else {
-      Step(state.copy(utf8 = Vector.empty[Byte], utf8Need = 0, altPending = false), Vector(printable(Replacement, state.altPending)), false)
+      Step(
+        state.copy(utf8 = Vector.empty[Byte], utf8Need = 0, altPending = false),
+        Vector(printable(Replacement, state.altPending)),
+        NoReplies,
+        false,
+      )
     }
 
   /** The scalar value of a complete lead-plus-continuations sequence, U+FFFD for an overlong, surrogate, or out-of-range one. */
@@ -145,59 +157,67 @@ object Decoder {
 
   private def escape(state: DecoderState, b: Int): Step =
     if (b === '['.toInt) {
-      Step(state.copy(mode = Csi(Vector.empty[Byte], false)), Vector.empty[Event], true)
+      Step(state.copy(mode = Csi(Vector.empty[Byte], false)), Vector.empty[Event], NoReplies, true)
     } else if (b === 'O'.toInt) {
-      Step(state.copy(mode = Ss3), Vector.empty[Event], true)
-    } else if (b === 'P'.toInt || b === ']'.toInt || b === 'X'.toInt || b === '^'.toInt || b === '_'.toInt) {
-      Step(state.copy(mode = StringSeq(false, 0)), Vector.empty[Event], true)
+      Step(state.copy(mode = Ss3), Vector.empty[Event], NoReplies, true)
+    } else if (b === 'P'.toInt) {
+      Step(state.copy(mode = StringSeq(StringKind.Dcs, false, 0, Vector.empty[Byte])), Vector.empty[Event], NoReplies, true)
+    } else if (b === ']'.toInt) {
+      Step(state.copy(mode = StringSeq(StringKind.Osc, false, 0, Vector.empty[Byte])), Vector.empty[Event], NoReplies, true)
+    } else if (b === 'X'.toInt) {
+      Step(state.copy(mode = StringSeq(StringKind.Sos, false, 0, Vector.empty[Byte])), Vector.empty[Event], NoReplies, true)
+    } else if (b === '^'.toInt) {
+      Step(state.copy(mode = StringSeq(StringKind.Pm, false, 0, Vector.empty[Byte])), Vector.empty[Event], NoReplies, true)
+    } else if (b === '_'.toInt) {
+      Step(state.copy(mode = StringSeq(StringKind.Apc, false, 0, Vector.empty[Byte])), Vector.empty[Event], NoReplies, true)
     } else if (b === Esc) {
-      Step(state, Vector(key(KeyCode.Escape, KeyModifiers.empty)), true)
+      Step(state, Vector(key(KeyCode.Escape, KeyModifiers.empty)), NoReplies, true)
     } else if (b >= 0x20 && b <= 0x2f) {
-      Step(state.copy(mode = EscapeIntermediate(Vector(b.toByte))), Vector.empty[Event], true)
+      Step(state.copy(mode = EscapeIntermediate(Vector(b.toByte))), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0x30 && b <= 0x7e) {
-      Step(state.copy(mode = Ground, altPending = false), Vector(printable(b.toChar, true)), true)
+      Step(state.copy(mode = Ground, altPending = false), Vector(printable(b.toChar, true)), NoReplies, true)
     } else if (b < 0x20 || b === Del) {
-      Step(state.copy(mode = Ground, altPending = false), Vector(control(b, true)), true)
+      Step(state.copy(mode = Ground, altPending = false), Vector(control(b, true)), NoReplies, true)
     } else {
-      Step(state.copy(mode = Ground, altPending = true), Vector.empty[Event], false)
+      Step(state.copy(mode = Ground, altPending = true), Vector.empty[Event], NoReplies, false)
     }
 
   private def escapeIntermediate(state: DecoderState, bytes: Vector[Byte], b: Int): Step =
     if (b === Esc) {
-      Step(state.copy(mode = Escape), Vector.empty[Event], true)
+      Step(state.copy(mode = Escape), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0x20 && b <= 0x2f) {
       val next = if (bytes.lengthIs >= DecoderLimits.MaxControlSequence) bytes else bytes :+ b.toByte
-      Step(state.copy(mode = EscapeIntermediate(next)), Vector.empty[Event], true)
+      Step(state.copy(mode = EscapeIntermediate(next)), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0x30 && b <= 0x7e) {
-      Step(state.copy(mode = Ground), Vector.empty[Event], true)
+      Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, true)
     } else {
-      Step(state.copy(mode = Ground), Vector.empty[Event], false)
+      Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, false)
     }
 
   private def csi(state: DecoderState, bytes: Vector[Byte], ignoring: Boolean, b: Int): Step =
     if (b === Esc) {
-      Step(state.copy(mode = Escape), Vector.empty[Event], true)
+      Step(state.copy(mode = Escape), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0x20 && b <= 0x3f) {
       if (ignoring || bytes.lengthIs >= DecoderLimits.MaxControlSequence)
-        Step(state.copy(mode = Csi(bytes, true)), Vector.empty[Event], true)
-      else Step(state.copy(mode = Csi(bytes :+ b.toByte, false)), Vector.empty[Event], true)
+        Step(state.copy(mode = Csi(bytes, true)), Vector.empty[Event], NoReplies, true)
+      else Step(state.copy(mode = Csi(bytes :+ b.toByte, false)), Vector.empty[Event], NoReplies, true)
     } else if (b >= 0x40 && b <= 0x7e) {
       if (ignoring) {
-        Step(state.copy(mode = Ground), Vector.empty[Event], true)
+        Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, true)
       } else {
-        dispatch(bytes, b.toChar) match {
-          case (mode, events) => Step(state.copy(mode = mode), events, true)
+        dispatch(bytes, b.toChar, state.expectingReplies) match {
+          case (mode, events, replies) => Step(state.copy(mode = mode), events, replies, true)
         }
       }
     } else {
-      Step(state.copy(mode = Ground), Vector.empty[Event], false)
+      Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, false)
     }
 
   private def ss3(state: DecoderState, b: Int): Step =
     if (b === Esc) {
-      Step(state.copy(mode = Escape), Vector.empty[Event], true)
+      Step(state.copy(mode = Escape), Vector.empty[Event], NoReplies, true)
     } else if (b < 0x20 || b === Del) {
-      Step(state.copy(mode = Ground), Vector.empty[Event], false)
+      Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, false)
     } else {
       val events = b.toChar match {
         case 'A' => Vector(key(KeyCode.Up, KeyModifiers.empty))
@@ -213,32 +233,86 @@ object Decoder {
         case 'M' => Vector(key(KeyCode.Enter, KeyModifiers.empty))
         case _ => Vector.empty[Event]
       }
-      Step(state.copy(mode = Ground), events, true)
+      Step(state.copy(mode = Ground), events, NoReplies, true)
     }
 
-  private def stringSeq(state: DecoderState, escPending: Boolean, length: Int, b: Int): Step =
+  private def stringSeq(state: DecoderState, kind: StringKind, escPending: Boolean, length: Int, bytes: Vector[Byte], b: Int): Step =
     if (escPending) {
-      if (b === '\\'.toInt) Step(state.copy(mode = Ground), Vector.empty[Event], true)
-      else Step(state.copy(mode = Escape), Vector.empty[Event], false)
+      if (b === '\\'.toInt) Step(state.copy(mode = Ground), Vector.empty[Event], stringReply(kind, bytes), true)
+      else Step(state.copy(mode = Escape), Vector.empty[Event], NoReplies, false)
     } else if (b === Bel) {
-      Step(state.copy(mode = Ground), Vector.empty[Event], true)
+      Step(state.copy(mode = Ground), Vector.empty[Event], stringReply(kind, bytes), true)
     } else if (b === Esc) {
-      Step(state.copy(mode = StringSeq(true, length)), Vector.empty[Event], true)
+      Step(state.copy(mode = StringSeq(kind, true, length, bytes)), Vector.empty[Event], NoReplies, true)
     } else {
-      Step(state.copy(mode = StringSeq(false, math.min(length + 1, DecoderLimits.MaxStringSequence))), Vector.empty[Event], true)
+      val buffered =
+        if (kind === StringKind.Dcs && length < DecoderLimits.MaxStringSequence) bytes :+ b.toByte else bytes
+      Step(
+        state.copy(mode = StringSeq(kind, false, math.min(length + 1, DecoderLimits.MaxStringSequence), buffered)),
+        Vector.empty[Event],
+        NoReplies,
+        true,
+      )
     }
+
+  /** A terminated DCS body parsed as a reply: `1 + r` and `0 + r` termcap answers, `> |` version answers, anything else dropped. */
+  private def stringReply(kind: StringKind, bytes: Vector[Byte]): Vector[Reply] =
+    kind match {
+      case StringKind.Dcs => dcsReply(new String(bytes.toArray, StandardCharsets.UTF_8)).fold(NoReplies)(reply => Vector(reply))
+      case StringKind.Osc | StringKind.Apc | StringKind.Pm | StringKind.Sos => NoReplies
+    }
+
+  private def dcsReply(body: String): Option[Reply] =
+    if (body.startsWith("1+r")) Reply.TermcapReply(true, termcapEntries(body.substring(3))).some
+    else if (body.startsWith("0+r")) Reply.TermcapReply(false, termcapEntries(body.substring(3))).some
+    else if (body.startsWith(">|")) Reply.VersionReply(body.substring(2)).some
+    else none[Reply]
+
+  private def termcapEntries(payload: String): Vector[Reply.TermcapEntry] =
+    if (payload.isEmpty) {
+      Vector.empty[Reply.TermcapEntry]
+    } else {
+      payload.split(";", -1).toVector.flatMap { entry =>
+        entry.split("=", 2).toList match {
+          case name :: Nil => hexDecode(name).map(Reply.TermcapEntry(_, none[String]))
+          case name :: value :: Nil => hexDecode(name).map(n => Reply.TermcapEntry(n, hexDecode(value)))
+          case _ => none[Reply.TermcapEntry]
+        }
+      }
+    }
+
+  /** Two lowercase or uppercase hex digits per character, `None` for a malformed payload. */
+  private def hexDecode(hex: String): Option[String] =
+    if (hex.isEmpty || (hex.length % 2 !== 0) || !hex.forall(isHexDigit)) {
+      none[String]
+    } else {
+      val builder = new java.lang.StringBuilder(hex.length / 2)
+      hexLoop(hex, 0, builder)
+      builder.toString.some
+    }
+
+  @tailrec
+  private def hexLoop(hex: String, i: Int, builder: java.lang.StringBuilder): Unit =
+    if (i >= hex.length) {
+      ()
+    } else {
+      builder.append(Integer.parseInt(hex.substring(i, i + 2), 16).toChar): Unit
+      hexLoop(hex, i + 2, builder)
+    }
+
+  private def isHexDigit(c: Char): Boolean = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 
   private def x10(state: DecoderState, bytes: Vector[Byte], b: Int): Step = {
     val next = bytes :+ b.toByte
     if (next.lengthIs < 3) {
-      Step(state.copy(mode = X10Mouse(next)), Vector.empty[Event], true)
+      Step(state.copy(mode = X10Mouse(next)), Vector.empty[Event], NoReplies, true)
     } else {
       val values = next.map(_.toInt & 0xff)
       val events = values.toList match {
         case cb :: cx :: cy :: Nil if cb >= 32 && cx >= 32 && cy >= 32 => mouse(cb - 32, cx - 32, cy - 32, false, true)
         case _ => Vector.empty[Event]
       }
-      Step(state.copy(mode = Ground), events, true)
+      Step(state.copy(mode = Ground), events, NoReplies, true)
     }
   }
 
@@ -246,14 +320,14 @@ object Decoder {
     if (b === PasteTerminator(matched)) {
       if (matched + 1 >= TerminatorLength) {
         val text = new String(body.toArray, StandardCharsets.UTF_8)
-        Step(state.copy(mode = Ground), Vector(Event.paste(text)), true)
+        Step(state.copy(mode = Ground), Vector(Event.paste(text)), NoReplies, true)
       } else {
-        Step(state.copy(mode = Paste(body, matched + 1)), Vector.empty[Event], true)
+        Step(state.copy(mode = Paste(body, matched + 1)), Vector.empty[Event], NoReplies, true)
       }
     } else {
       val flushed = appendPaste(body, PasteTerminator.take(matched).map(_.toByte).toVector)
-      if (b === PasteTerminator(0)) Step(state.copy(mode = Paste(flushed, 1)), Vector.empty[Event], true)
-      else Step(state.copy(mode = Paste(appendPaste(flushed, Vector(b.toByte)), 0)), Vector.empty[Event], true)
+      if (b === PasteTerminator(0)) Step(state.copy(mode = Paste(flushed, 1)), Vector.empty[Event], NoReplies, true)
+      else Step(state.copy(mode = Paste(appendPaste(flushed, Vector(b.toByte)), 0)), Vector.empty[Event], NoReplies, true)
     }
 
   private def appendPaste(body: Vector[Byte], bytes: Vector[Byte]): Vector[Byte] = {
@@ -261,24 +335,24 @@ object Decoder {
     if (room <= 0) body else body ++ bytes.take(room)
   }
 
-  private def tick(state: DecoderState): (DecoderState, Vector[Event]) = {
+  private def tick(state: DecoderState): Decoded = {
     val flushedUtf8 = if (state.utf8Need > 0) Vector(printable(Replacement, state.altPending)) else Vector.empty[Event]
     val cleared     = state.copy(utf8 = Vector.empty[Byte], utf8Need = 0, altPending = false)
     state.mode match {
-      case Ground | Paste(_, _) => (cleared, flushedUtf8)
-      case Escape => (cleared.copy(mode = Ground), flushedUtf8 :+ key(KeyCode.Escape, KeyModifiers.empty))
+      case Ground | Paste(_, _) => Decoded(cleared, flushedUtf8, NoReplies)
+      case Escape => Decoded(cleared.copy(mode = Ground), flushedUtf8 :+ key(KeyCode.Escape, KeyModifiers.empty), NoReplies)
       case EscapeIntermediate(bytes) => refeed(cleared, flushedUtf8, bytes)
       case Csi(bytes, _) =>
-        if (bytes.isEmpty) (cleared.copy(mode = Ground), flushedUtf8 :+ printable('[', true))
+        if (bytes.isEmpty) Decoded(cleared.copy(mode = Ground), flushedUtf8 :+ printable('[', true), NoReplies)
         else refeed(cleared, flushedUtf8, '['.toByte +: bytes)
-      case Ss3 => (cleared.copy(mode = Ground), flushedUtf8 :+ printable('O', true))
-      case StringSeq(_, _) | X10Mouse(_) => (cleared.copy(mode = Ground), flushedUtf8)
+      case Ss3 => Decoded(cleared.copy(mode = Ground), flushedUtf8 :+ printable('O', true), NoReplies)
+      case StringSeq(_, _, _, _) | X10Mouse(_) => Decoded(cleared.copy(mode = Ground), flushedUtf8, NoReplies)
     }
   }
 
-  /** Escape, then the buffered bytes read again from the ground state (plan refinement R5). */
-  private def refeed(cleared: DecoderState, before: Vector[Event], bytes: Vector[Byte]): (DecoderState, Vector[Event]) =
-    feed(IArray.from(bytes), 0, cleared.copy(mode = Ground), before :+ key(KeyCode.Escape, KeyModifiers.empty))
+  /** Escape, then the buffered bytes read again from the ground state (plan refinement R5 of M1e). */
+  private def refeed(cleared: DecoderState, before: Vector[Event], bytes: Vector[Byte]): Decoded =
+    feed(IArray.from(bytes), 0, cleared.copy(mode = Ground), before :+ key(KeyCode.Escape, KeyModifiers.empty), NoReplies)
 
   final private case class Parsed(marker: Option[Char], params: Vector[Option[Int]], intermediates: Vector[Char])
 
@@ -297,44 +371,65 @@ object Decoder {
   private def number(s: String): Option[Int] =
     if (s.nonEmpty && s.length <= 7 && s.forall(c => c >= '0' && c <= '9')) s.toInt.some else none[Int]
 
-  private def dispatch(bytes: Vector[Byte], fin: Char): (DecoderMode, Vector[Event]) = {
+  private def dispatch(bytes: Vector[Byte], fin: Char, expectingReplies: Boolean): (DecoderMode, Vector[Event], Vector[Reply]) = {
     val parsed    = parse(bytes)
     val plain     = parsed.marker.isEmpty && parsed.intermediates.isEmpty
     val modifiers = parsed.params.lift(1).flatten.map(modifiersOf).getOrElse(KeyModifiers.empty)
     fin match {
-      case 'A' if plain => (Ground, Vector(key(KeyCode.Up, modifiers)))
-      case 'B' if plain => (Ground, Vector(key(KeyCode.Down, modifiers)))
-      case 'C' if plain => (Ground, Vector(key(KeyCode.Right, modifiers)))
-      case 'D' if plain => (Ground, Vector(key(KeyCode.Left, modifiers)))
-      case 'H' if plain => (Ground, Vector(key(KeyCode.Home, modifiers)))
-      case 'F' if plain => (Ground, Vector(key(KeyCode.End, modifiers)))
-      case 'P' if plain => (Ground, Vector(key(KeyCode.f(1), modifiers)))
-      case 'Q' if plain => (Ground, Vector(key(KeyCode.f(2), modifiers)))
-      case 'R' if plain => (Ground, Vector(key(KeyCode.f(3), modifiers)))
-      case 'S' if plain => (Ground, Vector(key(KeyCode.f(4), modifiers)))
-      case 'Z' if plain => (Ground, Vector(key(KeyCode.BackTab, KeyModifiers(KeyModifier.Shift))))
-      case 'I' if plain => (Ground, Vector(Event.FocusGained))
-      case 'O' if plain => (Ground, Vector(Event.FocusLost))
+      case 'A' if plain => (Ground, Vector(key(KeyCode.Up, modifiers)), NoReplies)
+      case 'B' if plain => (Ground, Vector(key(KeyCode.Down, modifiers)), NoReplies)
+      case 'C' if plain => (Ground, Vector(key(KeyCode.Right, modifiers)), NoReplies)
+      case 'D' if plain => (Ground, Vector(key(KeyCode.Left, modifiers)), NoReplies)
+      case 'H' if plain => (Ground, Vector(key(KeyCode.Home, modifiers)), NoReplies)
+      case 'F' if plain => (Ground, Vector(key(KeyCode.End, modifiers)), NoReplies)
+      case 'P' if plain => (Ground, Vector(key(KeyCode.f(1), modifiers)), NoReplies)
+      case 'Q' if plain => (Ground, Vector(key(KeyCode.f(2), modifiers)), NoReplies)
+      case 'R' if plain && expectingReplies => (Ground, Vector.empty[Event], cursorReport(parsed))
+      case 'R' if plain => (Ground, Vector(key(KeyCode.f(3), modifiers)), NoReplies)
+      case 'S' if plain => (Ground, Vector(key(KeyCode.f(4), modifiers)), NoReplies)
+      case 'Z' if plain => (Ground, Vector(key(KeyCode.BackTab, KeyModifiers(KeyModifier.Shift))), NoReplies)
+      case 'I' if plain => (Ground, Vector(Event.FocusGained), NoReplies)
+      case 'O' if plain => (Ground, Vector(Event.FocusLost), NoReplies)
       case '~' if plain =>
         parsed.params.headOption.flatten match {
-          case Some(200) => (Paste(Vector.empty[Byte], 0), Vector.empty[Event])
-          case Some(n) => (Ground, tilde(n, modifiers))
-          case None => (Ground, Vector.empty[Event])
+          case Some(200) => (Paste(Vector.empty[Byte], 0), Vector.empty[Event], NoReplies)
+          case Some(n) => (Ground, tilde(n, modifiers), NoReplies)
+          case None => (Ground, Vector.empty[Event], NoReplies)
         }
       case 'M' | 'm' if parsed.marker === '<'.some && parsed.params.length === 3 =>
         (parsed.params.headOption.flatten, parsed.params.lift(1).flatten, parsed.params.lift(2).flatten) match {
-          case (Some(b), Some(x), Some(y)) => (Ground, mouse(b, x, y, fin === 'm', false))
-          case (_, _, _) => (Ground, Vector.empty[Event])
+          case (Some(b), Some(x), Some(y)) => (Ground, mouse(b, x, y, fin === 'm', false), NoReplies)
+          case (_, _, _) => (Ground, Vector.empty[Event], NoReplies)
         }
-      case 'M' if plain && parsed.params.isEmpty => (X10Mouse(Vector.empty[Byte]), Vector.empty[Event])
+      case 'M' if plain && parsed.params.isEmpty => (X10Mouse(Vector.empty[Byte]), Vector.empty[Event], NoReplies)
       case 'M' if plain && parsed.params.length === 3 =>
         (parsed.params.headOption.flatten, parsed.params.lift(1).flatten, parsed.params.lift(2).flatten) match {
-          case (Some(b), Some(x), Some(y)) if b >= 32 => (Ground, mouse(b - 32, x, y, false, true))
-          case (_, _, _) => (Ground, Vector.empty[Event])
+          case (Some(b), Some(x), Some(y)) if b >= 32 => (Ground, mouse(b - 32, x, y, false, true), NoReplies)
+          case (_, _, _) => (Ground, Vector.empty[Event], NoReplies)
         }
-      case _ => (Ground, Vector.empty[Event])
+      case 'c' if parsed.marker === '?'.some => (Ground, Vector.empty[Event], Vector(Reply.PrimaryDeviceAttributes(flatParams(parsed))))
+      case 'c' if parsed.marker === '>'.some =>
+        (Ground, Vector.empty[Event], Vector(Reply.SecondaryDeviceAttributes(flatParams(parsed))))
+      case 'y' if parsed.marker === '?'.some && parsed.intermediates === Vector('$') =>
+        (parsed.params.headOption.flatten, parsed.params.lift(1).flatten) match {
+          case (Some(mode), Some(value)) => (Ground, Vector.empty[Event], Vector(Reply.PrivateModeReport(mode, value)))
+          case (_, _) => (Ground, Vector.empty[Event], NoReplies)
+        }
+      case _ => (Ground, Vector.empty[Event], NoReplies)
     }
   }
+
+  private def flatParams(parsed: Parsed): Vector[Int] = parsed.params.map(_.getOrElse(0))
+
+  /** The Cursor Position Report, 1-based in the wire form, 0-based in the reply, dropped outside `1..MaxCoordinate`. */
+  private def cursorReport(parsed: Parsed): Vector[Reply] =
+    (parsed.params.headOption.flatten, parsed.params.lift(1).flatten) match {
+      case (Some(row), Some(column))
+          if parsed.params.length === 2 && row >= 1 && column >= 1 && row <= DecoderLimits.MaxCoordinate &&
+            column <= DecoderLimits.MaxCoordinate =>
+        Vector(Reply.CursorPosition(Position(NonNegInts.clamp(column.toLong - 1L), NonNegInts.clamp(row.toLong - 1L))))
+      case (_, _) => NoReplies
+    }
 
   private def tilde(n: Int, modifiers: KeyModifiers): Vector[Event] = {
     val code = n match {
