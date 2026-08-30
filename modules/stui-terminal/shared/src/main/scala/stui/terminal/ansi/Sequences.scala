@@ -19,6 +19,12 @@ object Sequences {
   /** Cursor Position, `CSI row ; column H`, both 1-based. */
   def cup(row: Int, column: Int): String = s"$Csi${row.toString};${column.toString}H"
 
+  /** Cursor Horizontal Absolute to the 1-based `column` of the current row: the join break of a printed row (rule R2a).
+    *
+    * @since 2026-08-31
+    */
+  def cha(column: Int): String = s"$Csi${column.toString}G"
+
   /** `CSI 0 m`, every attribute and colour back to the default. */
   val SgrReset: String = Csi + "0m"
 
