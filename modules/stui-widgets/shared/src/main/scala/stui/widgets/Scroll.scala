@@ -4,8 +4,10 @@ import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import refined4s.types.numeric.NonNegInt
 
-/** A [[Paragraph]] scroll offset: `rows` skips display rows (wrapped rows in wrap mode), `columns` skips display columns (truncate
-  * mode only, and only on left-aligned lines).
+/** A cell-based scroll offset, shared by [[Paragraph]] and the scroll-view family (design doc 6.6, M2a): `rows` skips display rows
+  * (wrapped rows in Paragraph's wrap mode, content rows in a [[ScrollView]]), `columns` skips display columns (for Paragraph in
+  * truncate mode only, and only on left-aligned lines; for a ScrollView the horizontal window offset). The [[Scrolling]] rules
+  * clamp it during render through the returned state.
   *
   * @author Kevin Lee
   * @since 2026-08-24

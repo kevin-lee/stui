@@ -206,6 +206,66 @@ final class Canvas private[buffer] (
   /** Every cell of the intersection becomes [[Cell.blank]], with the same edge repairs as [[fill]]. */
   def clear(rect: Rect): Unit = fill(rect, " ", Style.empty)
 
+  /** Copies a window of `source` into `to`: the source cell at `from` (plus a column and row delta) lands on the matching cell of
+    * `to`, clipped to both the canvas area (the source start shifts with the clip) and the source area (cells of `to` beyond the
+    * source stay untouched, so a window larger than the content shows what was under it). Every written cell reproduces the source
+    * cell's exact appearance ([[stui.core.style.CellStyle.toStyle]] is a replacement patch) and goes through the invariant-repairing
+    * write path. Widths are re-measured under this canvas's policy, so the copy is meaningful when the source was rendered under the
+    * same policy (the scroll-view family guarantees that by construction); under a different policy content may shift, but the cell
+    * invariant always holds. A wide glyph cut at the window's left edge (a continuation whose owner lies outside) or right edge (no
+    * room for its continuation) becomes a blank carrying the glyph's style, so the window shows no holes. Position sums saturate
+    * like the rest of the geometry algebra. Nothing happens once the canvas is closed.
+    */
+  def copyFrom(source: Buffer, from: Position, to: Rect): Unit =
+    if (isOpen) {
+      val target = to.intersection(area)
+      if (target.isEmpty) {
+        ()
+      } else {
+        val sx0 = from.x.value.toLong + (target.x.value.toLong - to.x.value.toLong)
+        val sy0 = from.y.value.toLong + (target.y.value.toLong - to.y.value.toLong)
+        copyRows(source, sx0, sy0, target.x.value, target.y.value, target.width.value, target.height.value, 0)
+      }
+    } else {
+      ()
+    }
+
+  @tailrec
+  private def copyRows(source: Buffer, sx0: Long, sy0: Long, tx: Int, ty: Int, tw: Int, th: Int, dy: Int): Unit =
+    if (dy >= th) {
+      ()
+    } else {
+      copyRow(source, sx0, sy0 + dy.toLong, tx, ty + dy, tw, 0)
+      copyRows(source, sx0, sy0, tx, ty, tw, th, dy + 1)
+    }
+
+  /** Walks one target row with the source column advancing in lockstep: a wide glyph with room writes both columns and advances 2. */
+  @tailrec
+  private def copyRow(source: Buffer, sx0: Long, sy: Long, tx: Int, y: Int, tw: Int, dx: Int): Unit =
+    if (dx >= tw) {
+      ()
+    } else {
+      val advance = source.cell(Position(NonNegInts.clamp(sx0 + dx.toLong), NonNegInts.clamp(sy))) match {
+        case None => 1
+        case Some(Cell.Continuation(style)) =>
+          writeGlyph(tx + dx, y, " ", 1, style.toStyle)
+          1
+        case Some(Cell.Glyph(symbol, _, style)) =>
+          val w = math.min(2, policy.clusterWidth(symbol.value, 0, symbol.value.length))
+          if (w === 2 && dx + 1 < tw) {
+            writeGlyph(tx + dx, y, symbol.value, 2, style.toStyle)
+            2
+          } else if (w === 2) {
+            writeGlyph(tx + dx, y, " ", 1, style.toStyle)
+            1
+          } else {
+            writeGlyph(tx + dx, y, symbol.value, 1, style.toStyle)
+            1
+          }
+      }
+      copyRow(source, sx0, sy, tx, y, tw, dx + advance)
+    }
+
   /** Records where the terminal cursor goes after the present (a text input's caret). A position outside the area is dropped, the last
     * call wins, nothing happens once the canvas is closed.
     */

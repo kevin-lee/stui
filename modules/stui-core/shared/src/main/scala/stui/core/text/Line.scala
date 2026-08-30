@@ -7,8 +7,9 @@ import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.Canvas
 import stui.core.geometry.{Position, Rect}
 import stui.core.internal.NonNegInts
+import stui.core.geometry.Size
 import stui.core.style.Style
-import stui.core.widget.Widget
+import stui.core.widget.{Measurable, Widget}
 import stui.unicode.WidthPolicy
 
 /** One line of spans with a line-level style patch and an optional alignment. The style written for a span is the line style patched
@@ -17,7 +18,7 @@ import stui.unicode.WidthPolicy
   * @author Kevin Lee
   * @since 2026-08-23
   */
-final case class Line(spans: Vector[Span], style: Style, alignment: Option[Alignment]) extends Widget derives Eq, Show, Hash {
+final case class Line(spans: Vector[Span], style: Style, alignment: Option[Alignment]) extends Widget, Measurable derives Eq, Show, Hash {
 
   /* the method lives in the class body because it implements the Widget trait member (the documented carve-out from the
    * extensions-in-companions rule) */
@@ -43,6 +44,15 @@ final case class Line(spans: Vector[Span], style: Style, alignment: Option[Align
       )
     }
   }
+
+  /* the method lives in the class body because it implements the Measurable trait member (the documented carve-out from the
+   * extensions-in-companions rule) */
+  /** One row of the line's display width, both truncated by the constraints (D18, M2a). */
+  override def measure(constraints: Size, policy: WidthPolicy): Size =
+    Size(
+      NonNegInts.clamp(math.min(this.width(policy).toLong, constraints.width.value.toLong)),
+      NonNegInts.clamp(math.min(1L, constraints.height.value.toLong)),
+    )
 }
 
 object Line {

@@ -48,6 +48,12 @@ object CanvasFixturesSpec extends Properties {
     example("writes outside the area are no-ops", testOutside),
     example("a leaked canvas is inert", testLeak),
     example("putLine writes the resolved span styles", testPutLine),
+    example("copyFrom places a window of the source", testCopyWindow),
+    example("copyFrom paints a cut left edge as a styled blank", testCopyCutLeft),
+    example("copyFrom paints a wide glyph at the window's last column as a styled blank", testCopyCutRight),
+    example("copyFrom clips to the canvas and shifts the source start", testCopyClip),
+    example("copyFrom leaves cells beyond the source untouched", testCopyOutsideSource),
+    example("copyFrom repairs a wide glyph under the window edge", testCopyRepairsWide),
   )
 
   def testOverContinuation: Result = {
@@ -147,9 +153,67 @@ object CanvasFixturesSpec extends Properties {
     val leak   = Array(Option.empty[Canvas])
     val buffer = Buffer.empty(rect(0, 0, 2, 1)).draw(canvas => leak(0) = canvas.some)
     leak(0).foreach(_.putString(at(0, 0), "z", Style.empty))
+    leak(0).foreach(_.copyFrom(Buffer.empty(rect(0, 0, 1, 1)).draw(_.putString(at(0, 0), "z", Style.empty)), at(0, 0), rect(0, 0, 1, 1)))
     Result.all(
       List(Assertions.eqv(buffer, Buffer.empty(rect(0, 0, 2, 1))), Result.assert(!Buffer.renderRows(buffer).exists(_.contains("z"))))
     )
+  }
+
+  def testCopyWindow: Result = {
+    val source = Buffer.empty(rect(0, 0, 4, 2)).draw { canvas =>
+      canvas.putString(at(0, 0), "abcd", Style.empty)
+      canvas.putString(at(0, 1), "efgh", blueBg)
+    }
+    val buffer = Buffer.empty(rect(0, 0, 6, 4)).draw(_.copyFrom(source, at(1, 0), rect(1, 1, 2, 2)))
+    Result.all(
+      List(
+        Assertions.eqv(Buffer.renderRows(buffer), Vector("      ", " bc   ", " fg   ", "      ")),
+        Assertions.eqv(buffer.cell(at(1, 2)).map(_.style), CellStyle.default.copy(bg = Color.Blue).some),
+      )
+    )
+  }
+
+  def testCopyCutLeft: Result = {
+    val source = Buffer.empty(rect(0, 0, 3, 1)).draw(_.putString(at(0, 0), s"${ko}b", blueBg))
+    val buffer = Buffer.empty(rect(0, 0, 3, 1)).draw(_.copyFrom(source, at(1, 0), rect(0, 0, 2, 1)))
+    Result.all(
+      List(
+        Assertions.eqv(Buffer.renderRows(buffer), Vector(" b ")),
+        Assertions.eqv(buffer.cell(at(0, 0)), (Cell.blankWith(CellStyle.default.copy(bg = Color.Blue)): Cell).some),
+      )
+    )
+  }
+
+  def testCopyCutRight: Result = {
+    val source = Buffer.empty(rect(0, 0, 2, 1)).draw(_.putString(at(0, 0), ko, blueBg))
+    val buffer = Buffer.empty(rect(0, 0, 3, 1)).draw(_.copyFrom(source, at(0, 0), rect(0, 0, 1, 1)))
+    Assertions.eqv(buffer.cell(at(0, 0)), (Cell.blankWith(CellStyle.default.copy(bg = Color.Blue)): Cell).some)
+  }
+
+  def testCopyClip: Result = {
+    val source = Buffer.empty(rect(0, 0, 4, 2)).draw { canvas =>
+      canvas.putString(at(0, 0), "abcd", Style.empty)
+      canvas.putString(at(0, 1), "efgh", Style.empty)
+    }
+    val buffer = Buffer.empty(rect(2, 1, 4, 2)).draw(_.copyFrom(source, at(0, 0), rect(0, 0, 4, 3)))
+    Assertions.eqv(Buffer.renderRows(buffer), Vector("gh  ", "    "))
+  }
+
+  def testCopyOutsideSource: Result = {
+    val source = Buffer.empty(rect(0, 0, 2, 1)).draw(_.putString(at(0, 0), "ab", Style.empty))
+    val buffer = Buffer.empty(rect(0, 0, 3, 1)).draw(_.copyFrom(source, at(5, 5), rect(0, 0, 3, 1)))
+    Assertions.eqv(buffer, Buffer.empty(rect(0, 0, 3, 1)))
+  }
+
+  def testCopyRepairsWide: Result = {
+    val source = Buffer.empty(rect(0, 0, 1, 1)).draw(_.putString(at(0, 0), "x", Style.empty))
+    val buffer = Buffer
+      .empty(rect(0, 0, 4, 1))
+      .draw { canvas =>
+        canvas.putString(at(0, 0), ko, Style.empty)
+        canvas.copyFrom(source, at(0, 0), rect(1, 0, 1, 1))
+      }
+    Assertions.eqv(cellsOf(buffer), Vector(Cell.blank, glyph("x"), Cell.blank, Cell.blank))
   }
 
   def testPutLine: Result = {

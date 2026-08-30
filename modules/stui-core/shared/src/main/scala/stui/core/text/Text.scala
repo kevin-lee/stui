@@ -5,10 +5,10 @@ import cats.derived.strict.*
 import cats.syntax.all.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.Canvas
-import stui.core.geometry.Rect
+import stui.core.geometry.{Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.style.Style
-import stui.core.widget.Widget
+import stui.core.widget.{Measurable, Widget}
 import stui.unicode.WidthPolicy
 
 /** Lines with a text-level style patch and an optional alignment that lines inherit when they have none
@@ -17,7 +17,7 @@ import stui.unicode.WidthPolicy
   * @author Kevin Lee
   * @since 2026-08-23
   */
-final case class Text(lines: Vector[Line], style: Style, alignment: Option[Alignment]) extends Widget derives Eq, Show, Hash {
+final case class Text(lines: Vector[Line], style: Style, alignment: Option[Alignment]) extends Widget, Measurable derives Eq, Show, Hash {
 
   /* the method lives in the class body because it implements the Widget trait member (the documented carve-out from the
    * extensions-in-companions rule) */
@@ -35,6 +35,15 @@ final case class Text(lines: Vector[Line], style: Style, alignment: Option[Align
       }
     }
   }
+
+  /* the method lives in the class body because it implements the Measurable trait member (the documented carve-out from the
+   * extensions-in-companions rule) */
+  /** The widest line by the line count, both truncated by the constraints (D18, M2a). */
+  override def measure(constraints: Size, policy: WidthPolicy): Size =
+    Size(
+      NonNegInts.clamp(math.min(this.width(policy).toLong, constraints.width.value.toLong)),
+      NonNegInts.clamp(math.min(this.height.toLong, constraints.height.value.toLong)),
+    )
 }
 
 object Text {

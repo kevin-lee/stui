@@ -157,6 +157,12 @@ object Capabilities {
     /** The capabilities with the VS16 width replaced. */
     def withVs16Width(width: GlyphWidth): Capabilities = capabilities.copy(vs16Width = width)
 
+    /** The glyph set widgets should draw with (design doc 7.3, M2a): [[GlyphSet.Ascii]] when the terminal treats East Asian
+      * Ambiguous characters as wide - most box-drawing characters are Ambiguous, so Unicode borders would take two columns there -
+      * and the detected `glyphs` otherwise. Widgets read this value, never the environment.
+      */
+    def effectiveGlyphs: GlyphSet = if (capabilities.ambiguousWide) GlyphSet.Ascii else capabilities.glyphs
+
   }
 
 }
