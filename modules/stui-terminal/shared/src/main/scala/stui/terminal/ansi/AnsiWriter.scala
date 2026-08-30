@@ -23,7 +23,8 @@ import scala.annotation.tailrec
   *     not the previous emitted wide glyph is painted as a space in the default style.
   *   - R2a (2026-08-31): a glyph that would join the previously emitted cluster into one grapheme cluster on the wire (a lone
   *     regional indicator after another, a standalone mark after any glyph) is preceded by an explicit cursor placement - CUP in a
-  *     present, CHA in a printed row - so the terminal keeps the cells apart ([[joins]]); the budget of R10 already covers it.
+  *     present, CHA in a printed row - so the terminal keeps the cells apart ([[stui.unicode.Graphemes.joins]]); the budget of R10
+  *     already covers it.
   *   - R3: a wide glyph is emitted with its continuation column accounted for, and a wide glyph whose shadow would fall outside the
   *     viewport is painted as a space in its style.
   *   - R4: a control never reaches the terminal as a glyph (impossible by the `GlyphSymbol` type).
@@ -323,18 +324,7 @@ object AnsiWriter {
 
   /** The CHA to cell `c`'s column when `next` would join `last` (rule R2a) in a printed row. */
   private def breakJoin(builder: java.lang.StringBuilder, last: String, next: String, c: Int): Unit =
-    if (joins(last, next)) builder.append(Sequences.cha(c + 1)): Unit else ()
-
-  /** True when `next` would join the previously emitted cluster `last` into one grapheme cluster on the wire (rule R2a): false for an
-    * empty `last` (the cursor was just placed) and on the ASCII fast path (both one printable ASCII character), else exactly one
-    * cluster by the segmenter.
-    */
-  def joins(last: String, next: String): Boolean =
-    if (last.isEmpty) false
-    else if (isAsciiPrintable(last) && isAsciiPrintable(next)) false
-    else Graphemes.count(last + next) === 1
-
-  private def isAsciiPrintable(s: String): Boolean = s.length === 1 && s.charAt(0) >= ' ' && s.charAt(0) <= '~'
+    if (Graphemes.joins(last, next)) builder.append(Sequences.cha(c + 1)): Unit else ()
 
   @tailrec
   private def loop(
@@ -389,7 +379,7 @@ object AnsiWriter {
       case CursorState.Known(current) => current.x.value === x && current.y.value === y
       case CursorState.PendingWrap(_) | CursorState.Unknown => false
     }
-    val cursor0    = if (continuing && joins(acc.last, symbol.value)) CursorState.Unknown else acc.cursor
+    val cursor0    = if (continuing && Graphemes.joins(acc.last, symbol.value)) CursorState.Unknown else acc.cursor
     val cursor     = ensureCursor(cursor0, builder, x, y)
     val tracked    = ensureStyle(acc.style, builder, capabilities, style)
     builder.append(symbol.value): Unit

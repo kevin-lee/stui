@@ -45,6 +45,11 @@ object ParagraphSpec extends Properties {
 
   private def contentOf(line: Line): String = line.spans.map(_.content).mkString
 
+  /** The wrapper's own tokenisation: the clusters of each span in order. A span boundary is a cluster boundary throughout the stack, so
+    * a cluster-level statement about a line never re-segments the concatenated content (issue 27).
+    */
+  private def tokensOf(line: Line): Vector[String] = line.spans.flatMap(span => Graphemes.clusters(span.content))
+
   override def tests: List[Test] =
     WidgetLaws.laws("paragraph", WidgetGens.paragraphWidget, outer) ++ List(
       property("no wrapped row is wider than the width", testRowWidths),
@@ -72,7 +77,7 @@ object ParagraphSpec extends Properties {
       val rows = WordWrap.wrap(Vector(line), width, true, policy)
       Result.all(
         rows.toList.map { row =>
-          val leading = Graphemes.clusters(contentOf(row)).headOption
+          val leading = tokensOf(row).headOption
           Result.assert(!leading.exists(isWhitespaceCluster)).log(s"leading whitespace on: ${contentOf(row)}")
         }
       )
@@ -84,12 +89,10 @@ object ParagraphSpec extends Properties {
       width <- widths.forAll
       trim  <- Gen.boolean.forAll
     } yield {
-      val expected = Graphemes
-        .clusters(contentOf(line))
-        .filter(cluster => clusterWidth(cluster) <= width && !isWhitespaceCluster(cluster))
+      val expected = tokensOf(line).filter(cluster => clusterWidth(cluster) <= width && !isWhitespaceCluster(cluster))
       val actual   = WordWrap
         .wrap(Vector(line), width, trim, policy)
-        .flatMap(row => Graphemes.clusters(contentOf(row)))
+        .flatMap(tokensOf)
         .filter(cluster => !isWhitespaceCluster(cluster))
       Assertions.eqv(actual, expected)
     }

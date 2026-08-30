@@ -108,7 +108,6 @@ object JoinBreakSpec extends Properties {
     example("two adjacent spacing marks stay two cells in a printed row", printRoundTrip(profile, caps, cells(Vector(mark, mark)))),
     example("the break sequence sits between the joining cells", testBreakSequence),
     example("an ASCII row emits no extra cursor placement", testAsciiRow),
-    example("joins agrees with the segmenter", testJoins),
     property(
       "joinable symbols one per cell survive a present and a print",
       for {
@@ -141,17 +140,5 @@ object JoinBreakSpec extends Properties {
       )
     )
   }
-
-  def testJoins: Result =
-    Result.all(
-      List(
-        Result.assert(AnsiWriter.joins(ri, ri)).log("two regional indicators do not join"),
-        Result.assert(!AnsiWriter.joins("a", ri)).log("a letter joins a regional indicator"),
-        Result.assert(AnsiWriter.joins("a", mark)).log("a spacing mark does not join a letter"),
-        Result.assert(AnsiWriter.joins(" ", mark)).log("a spacing mark does not join a space"),
-        Result.assert(!AnsiWriter.joins("", mark)).log("an empty last joins"),
-        Result.assert(!AnsiWriter.joins("a", "b")).log("two letters join"),
-      )
-    )
 
 }

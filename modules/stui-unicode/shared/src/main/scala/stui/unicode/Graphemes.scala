@@ -1,5 +1,6 @@
 package stui.unicode
 
+import stui.unicode.internal.IntOps.*
 import stui.unicode.internal.Segmenter
 
 /** Extended grapheme cluster segmentation (UAX #29) with the bundled Unicode tables, identical on JVM, Scala.js, and Scala Native.
@@ -28,5 +29,22 @@ object Graphemes {
 
   /** The number of clusters in `s`. */
   def count(s: String): Int = boundaries(s).length - 1
+
+  /** True when `next` would extend `last`'s cluster into a single cluster: a lone regional indicator after another, a standalone mark
+    * after any glyph. `last` is expected to be exactly one cluster, which is what both callers hold.
+    *
+    * False for an empty `last` (nothing to extend) and on the ASCII fast path (both a single printable ASCII character, which the
+    * segmenter always breaks between), else exactly one cluster by the segmenter.
+    *
+    * Two callers keep separate model units apart with it: the writer's rule R2a places the cursor explicitly between two cells whose
+    * symbols would join on the wire, and the word wrapper's span join break refuses to merge two spans whose contents would join into
+    * one cluster.
+    */
+  def joins(last: String, next: String): Boolean =
+    if (last.isEmpty) false
+    else if (isAsciiPrintable(last) && isAsciiPrintable(next)) false
+    else count(last + next) === 1
+
+  private def isAsciiPrintable(s: String): Boolean = s.length === 1 && s.charAt(0) >= ' ' && s.charAt(0) <= '~'
 
 }
