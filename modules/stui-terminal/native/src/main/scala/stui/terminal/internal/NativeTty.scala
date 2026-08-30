@@ -53,7 +53,10 @@ final class NativeTty private (private val saved: AtomicReference[Option[NativeT
       else ()
     }
 
-  override def enterRawMode(): Either[TerminalError, Unit] = {
+  override def enterRawMode(): Either[TerminalError, Unit] = if (saved.get().isDefined) {
+    /* already raw: the first save wins and restoreMode restores it once (the platform runner enters before the backend does) */
+    ().asRight[TerminalError]
+  } else {
     val zone     = Zone.open()
     val original = alloc[termios.termios]()(using zone)
     if (termios.tcgetattr(0, original) !== 0) {

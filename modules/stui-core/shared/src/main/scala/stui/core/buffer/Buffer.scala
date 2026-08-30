@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import extras.render.Render
 import refined4s.types.numeric.NonNegInt
 import stui.core.frame.{Region, Regions}
-import stui.core.geometry.{Position, Rect}
+import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.style.Style
 import stui.unicode.WidthPolicy
@@ -103,6 +103,22 @@ object Buffer {
     new Buffer(base.area, base.policy, IArray.unsafeFromArray(copy))
   }
 
+  private def sliceRows(buffer: Buffer, startRow: Int, count: Int): Buffer = {
+    val height = buffer.area.height.value
+    val n      = math.min(count, height)
+    if (n === height) {
+      buffer
+    } else {
+      val w = buffer.area.width.value
+      /* the copy does not escape */
+      new Buffer(
+        buffer.area.resize(Size(buffer.area.width, NonNegInts.clamp(n.toLong))),
+        buffer.policy,
+        IArray.tabulate(n * w)(i => buffer.cells(startRow * w + i)),
+      )
+    }
+  }
+
   /** [[Buffer.draw]] that also returns the cursor and the regions the canvas recorded (the `Frame.draw` mechanism). */
   private[core] def drawRecording(buffer: Buffer)(f: Canvas => Unit): (Buffer, Option[Position], Regions) = {
     val copy       = Array.tabulate(buffer.cells.length)(i => buffer.cells(i))
@@ -168,6 +184,20 @@ object Buffer {
       drawRecording(buffer)(f) match {
         case (drawn, _, _) => drawn
       }
+
+    /** The first `count` rows as a buffer of the same width, position, and policy (the whole buffer when `count` is at or above the
+      * height). Whole-row slices preserve the cell invariant because a wide glyph never spans rows.
+      */
+    def firstRows(count: NonNegInt): Buffer = sliceRows(buffer, 0, count.value)
+
+    /** The last `count` rows as a buffer of the same width, position, and policy (the whole buffer when `count` is at or above the
+      * height). Whole-row slices preserve the cell invariant because a wide glyph never spans rows.
+      */
+    def lastRows(count: NonNegInt): Buffer = {
+      val height = buffer.area.height.value
+      val n      = math.min(count.value, height)
+      sliceRows(buffer, height - n, n)
+    }
 
     /** The cells row by row. */
     def rows: Vector[Vector[Cell]] = {

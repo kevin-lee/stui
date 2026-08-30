@@ -96,7 +96,82 @@ object AnsiWriterFixturesSpec extends Properties {
     example("moveCursor to the tracked position emits nothing", testMoveCursor),
     example("enter and exit", testEnterExit),
     example("a wide glyph at the last column is a space in its style", testWideAtEdge),
+    example("a present at a viewport origin addresses absolute rows", testViewportOrigin),
+    example("the inline entry pads, hides, and arms the region", testEnterInline),
+    example("the inline exit resets the region and parks the cursor", testExitInline),
+    example("the region print scrolls rows in at the region bottom", testPrintRegion),
+    example("the overlay print erases, writes, and moves the viewport", testPrintOverlay),
   )
+
+  def testViewportOrigin: Result = {
+    val viewport = Rect(NonNegInt(0), NonNegInt(2), NonNegInt(5), NonNegInt(1))
+    val updates  = Vector(CellUpdate(at(0, 2), glyph("a")), CellUpdate(at(1, 2), glyph("b")))
+    AnsiWriter.present(WriterState.initial, lossless, viewport, updates) match {
+      case (state, output) =>
+        Result.all(
+          List(
+            Assertions.eqv(output, cup(3, 1) + "ab"),
+            Assertions.eqv(state.cursor, CursorState.Known(at(2, 2))),
+          )
+        )
+    }
+  }
+
+  def testEnterInline: Result = {
+    val options = TerminalOptions.of(ScreenMode.Inline(refined4s.types.numeric.PosInt(3)))
+    val region  = ScrollRegion(NonNegInt(0), NonNegInt(1))
+    AnsiWriter.enterInline(options, 2, Some(region)) match {
+      case (state, output) =>
+        Result.all(
+          List(
+            Assertions.eqv(output, Sequences.Cr + Sequences.Lf + Sequences.Lf + Sequences.CursorHide + Sequences.armRegion(1, 2)),
+            Assertions.eqv(state.cursor, (CursorState.Unknown: CursorState)),
+            Assertions.eqv(state.region, Some(region)),
+            Assertions.eqv(
+              AnsiWriter.enterInline(options, 0, None)._2,
+              Sequences.Cr + Sequences.CursorHide,
+            ),
+          )
+        )
+    }
+  }
+
+  def testExitInline: Result =
+    Assertions.eqv(
+      AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3))),
+      Sequences.FocusDisable + Sequences.BracketedPasteDisable + Sequences.MouseTrackingDisable + Sequences.SgrReset +
+        Sequences.CursorShow + Sequences.resetRegion + cup(6, 1) + Sequences.CrLf,
+    )
+
+  def testPrintRegion: Result = {
+    val region = ScrollRegion(NonNegInt(0), NonNegInt(3))
+    val rows   = Buffer.fromLines(Vector("ab"))
+    AnsiWriter.printRegion(WriterState.initial.copy(region = Some(region)), lossless, region, 5, rows) match {
+      case (state, output) =>
+        Result.all(
+          List(
+            Assertions.eqv(output, cup(4, 1) + Sequences.Lf + Sequences.Cr + "ab" + Sequences.EraseToLineEnd),
+            Assertions.eqv(state.cursor, (CursorState.Unknown: CursorState)),
+            Assertions.eqv(state.region, Some(region)),
+          )
+        )
+    }
+  }
+
+  def testPrintOverlay: Result = {
+    val viewport = Rect(NonNegInt(0), NonNegInt(2), NonNegInt(5), NonNegInt(2))
+    val terminal = Size(NonNegInt(5), NonNegInt(5))
+    AnsiWriter.printOverlay(WriterState.initial, lossless, viewport, terminal, Buffer.fromLines(Vector("x"))) match {
+      case (state, moved, output) =>
+        Result.all(
+          List(
+            Assertions.eqv(output, cup(3, 1) + Sequences.EraseBelow + "x" + Sequences.EraseToLineEnd + Sequences.CrLf),
+            Assertions.eqv(moved, Rect(NonNegInt(0), NonNegInt(3), NonNegInt(5), NonNegInt(2))),
+            Assertions.eqv(state.cursor, (CursorState.Unknown: CursorState)),
+          )
+        )
+    }
+  }
 
   private def glyph(symbol: String): Cell = Cell.glyph(stui.core.buffer.GlyphSymbol.unsafeFrom(symbol), GlyphWidth.One, CellStyle.default)
 
@@ -142,7 +217,11 @@ object AnsiWriterFixturesSpec extends Properties {
       case (state, output) =>
         Result.all(
           List(
-            Assertions.eqv(output, Sequences.Csi + "31m" + "a" + Sequences.Csi + "39m" + "b" + Sequences.CrLf + "c " + Sequences.CrLf),
+            Assertions.eqv(
+              output,
+              Sequences.Csi + "31m" + "a" + Sequences.Csi + "39m" + "b" + Sequences.CrLf +
+                "c" + Sequences.EraseToLineEnd + Sequences.CrLf,
+            ),
             Assertions.eqv(state.cursor, CursorState.Unknown),
             Assertions.eqv(state.style, CellStyle.default),
           )
@@ -171,7 +250,7 @@ object AnsiWriterFixturesSpec extends Properties {
             Assertions.eqv(output, Sequences.enter(options)),
             Assertions.eqv(state.cursor, CursorState.Known(Position.origin)),
             Assertions.eqv(AnsiWriter.exit, Sequences.SafeReset),
-            Assertions.eqv(AnsiWriter.clear(state)._2, Sequences.ClearScreen + Sequences.CursorHome),
+            Assertions.eqv(AnsiWriter.clearAll(state)._2, Sequences.ClearScreen + Sequences.CursorHome),
             Assertions.eqv(AnsiWriter.hideCursor(state)._2, Sequences.CursorHide),
             Assertions.eqv(AnsiWriter.showCursor(state)._2, Sequences.CursorShow),
           )

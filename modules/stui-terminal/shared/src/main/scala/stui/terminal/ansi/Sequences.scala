@@ -66,6 +66,46 @@ object Sequences {
   /** Carriage return and line feed, the row separator of printed rows. */
   val CrLf: String = "\r\n"
 
+  /** Carriage return alone. */
+  val Cr: String = "\r"
+
+  /** Line feed alone: at the bottom margin of the scroll region (or of the screen without one) it scrolls up by one line (IND
+    * semantics, the VT510 manual).
+    */
+  val Lf: String = "\n"
+
+  /** Save Cursor (DECSC), `ESC 7`: cursor position, SGR attributes, character sets, the wrap flag, and origin mode (VT510 manual). */
+  val SaveCursor: String = Esc + "7"
+
+  /** Restore Cursor (DECRC), `ESC 8`: restores what DECSC saved, or homes with defaults when nothing was saved (VT510 manual). */
+  val RestoreCursor: String = Esc + "8"
+
+  /** Set Top and Bottom Margins (DECSTBM), 1-based inclusive rows, `top` strictly below `bottom`. DECSTBM homes the cursor, so the
+    * writer only emits it inside [[armRegion]] (rule R7).
+    */
+  def scrollRegion(top: Int, bottom: Int): String = s"$Csi${top.toString};${bottom.toString}r"
+
+  /** DECSTBM with no parameters: the full screen, and the cursor homed. */
+  val ScrollRegionReset: String = Csi + "r"
+
+  /** The region set with the cursor preserved (rule R7): DECSC, DECSTBM, DECRC. */
+  def armRegion(top: Int, bottom: Int): String = SaveCursor + scrollRegion(top, bottom) + RestoreCursor
+
+  /** The region reset with the cursor preserved (rule R7). */
+  val resetRegion: String = SaveCursor + ScrollRegionReset + RestoreCursor
+
+  /** Begin Synchronized Update, mode 2026 set (the synchronized-output specification). */
+  val SyncBegin: String = Csi + "?2026h"
+
+  /** End Synchronized Update, mode 2026 reset. */
+  val SyncEnd: String = Csi + "?2026l"
+
+  /** Erase in Display from the cursor to the end of the screen (ED 0), the overlay print's viewport erase. */
+  val EraseBelow: String = Csi + "J"
+
+  /** Erase in Line from the cursor to the end of the row (EL 0), emitted after every printed row so a short row leaves no residue. */
+  val EraseToLineEnd: String = Csi + "K"
+
   /** The fixed reset every exit path emits, crash and signal paths included (rule R6): every optional mode off in reverse order, the
     * style reset, the cursor shown, and the normal screen restored. Disabling a mode that was never enabled is harmless, so one
     * sequence serves every feature set.
@@ -76,11 +116,16 @@ object Sequences {
     * terminal may not clear on mode 1049), the cursor hidden, then the enabled features in order (mouse with the hygiene reset first,
     * bracketed paste, focus). `KeyReleaseEvents` adds nothing until the kitty keyboard protocol (M3).
     */
-  def enter(options: TerminalOptions): String = {
+  def enter(options: TerminalOptions): String = AlternateScreenEnter + ClearScreen + CursorHome + CursorHide + features(options)
+
+  /** The feature part of an entry sequence, in order: mouse (with the hygiene reset first), bracketed paste, focus.
+    * `KeyReleaseEvents` adds nothing until the kitty keyboard protocol (M3).
+    */
+  def features(options: TerminalOptions): String = {
     val mouse = if (options.enabled(TerminalFeature.MouseCapture)) MouseHygieneReset + MouseTrackingEnable else ""
     val paste = if (options.enabled(TerminalFeature.BracketedPaste)) BracketedPasteEnable else ""
     val focus = if (options.enabled(TerminalFeature.FocusEvents)) FocusEnable else ""
-    AlternateScreenEnter + ClearScreen + CursorHome + CursorHide + mouse + paste + focus
+    mouse + paste + focus
   }
 
 }

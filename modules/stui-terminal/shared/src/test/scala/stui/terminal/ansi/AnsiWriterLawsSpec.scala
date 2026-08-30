@@ -44,7 +44,29 @@ object AnsiWriterLawsSpec extends Properties {
     property("the output is sanitised", testSanitised),
     property("print output is sanitised", testPrintSanitised),
     property("orphan continuations become default blanks (R2)", testOrphans),
+    property("a present at a viewport shows the next buffer there and touches nothing else", testViewportRoundTrip),
   )
+
+  def testViewportRoundTrip: Property =
+    for {
+      profile <- WriterGens.profile.forAll
+      caps    <- WriterGens.capabilitiesFor(profile).forAll
+      tv      <- WriterGens.terminalViewport.forAll
+      pair    <- WriterGens.pairAt(tv._2).forAll
+    } yield tv match {
+      case (terminal, viewport) =>
+        pair match {
+          case (prev, next) =>
+            val normalise = (style: CellStyle) => Sgr.normalise(caps, style)
+            AnsiWriter.present(WriterState.initial, caps, viewport, Buffer.diff(prev, next)) match {
+              case (_, output) =>
+                TerminalModel.interpret(profile, Screen.ofTerminal(profile, normalise, terminal, prev), output) match {
+                  case Right(screen) => sameBuffer(screen.buffer, TerminalModel.placed(profile, normalise, terminal, next))
+                  case Left(error) => Result.failure.log(s"${error.show} for ${output.replace(Sequences.Esc, "ESC")}")
+                }
+            }
+        }
+    }
 
   def testRoundTrip: Property =
     for {

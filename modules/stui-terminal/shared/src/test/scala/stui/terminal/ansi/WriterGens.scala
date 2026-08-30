@@ -1,9 +1,10 @@
 package stui.terminal.ansi
 
 import hedgehog.{Gen, Range}
+import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, Cell, CellUpdate}
 import stui.core.capability.Capabilities
-import stui.core.geometry.{Position, Rect}
+import stui.core.geometry.{Position, Rect, Size}
 import stui.testkit.TerminalModel.QuirkProfile
 import stui.testkit.gen.{BufferGens, CapabilityGens, GeometryGens, StyleGens}
 
@@ -66,6 +67,54 @@ object WriterGens {
       area,
       positions.zip(styles).map { case (position, style) => CellUpdate(position, Cell.continuation(style)) }.toVector.distinctBy(_.position),
     )
+
+  /** A terminal size and a full-width viewport inside it (the inline shape): origin row 0 to height - 1, viewport height at least 1. */
+  val terminalViewport: Gen[(Size, Rect)] =
+    for {
+      width  <- Gen.int(Range.linear(1, 10))
+      termH  <- Gen.int(Range.linear(2, 8))
+      origin <- Gen.int(Range.linear(0, termH - 1))
+      height <- Gen.int(Range.linear(1, termH - origin))
+    } yield (
+      Size(GeometryGens.nonNegOrZero(width.toLong), GeometryGens.nonNegOrZero(termH.toLong)),
+      Rect(
+        NonNegInt(0),
+        GeometryGens.nonNegOrZero(origin.toLong),
+        GeometryGens.nonNegOrZero(width.toLong),
+        GeometryGens.nonNegOrZero(height.toLong),
+      ),
+    )
+
+  /** [[terminalViewport]] with at least two rows above the viewport (the scroll-region shape, plan refinement R3). */
+  val terminalViewportWithRegion: Gen[(Size, Rect)] =
+    for {
+      width  <- Gen.int(Range.linear(1, 10))
+      termH  <- Gen.int(Range.linear(3, 8))
+      origin <- Gen.int(Range.linear(2, termH - 1))
+      height <- Gen.int(Range.linear(1, termH - origin))
+    } yield (
+      Size(GeometryGens.nonNegOrZero(width.toLong), GeometryGens.nonNegOrZero(termH.toLong)),
+      Rect(
+        NonNegInt(0),
+        GeometryGens.nonNegOrZero(origin.toLong),
+        GeometryGens.nonNegOrZero(width.toLong),
+        GeometryGens.nonNegOrZero(height.toLong),
+      ),
+    )
+
+  /** Two buffers over the given area: independent, or the second drawn on top of the first. */
+  def pairAt(area: Rect): Gen[(Buffer, Buffer)] =
+    for {
+      first       <- BufferGens.ops(area, Range.linear(0, 8))
+      second      <- BufferGens.ops(area, Range.linear(0, 8))
+      independent <- Gen.boolean
+    } yield {
+      val prev = BufferGens.bufferFrom(area, first)
+      (prev, if (independent) BufferGens.bufferFrom(area, second) else prev.draw(canvas => BufferGens.runAll(canvas, second)))
+    }
+
+  /** A random buffer over the given area. */
+  def bufferAt(area: Rect, ops: Range[Int]): Gen[Buffer] = BufferGens.ops(area, ops).map(BufferGens.bufferFrom(area, _))
 
   /** Positions strictly inside a non-empty area. */
   def positionWithin(area: Rect): Gen[Position] =

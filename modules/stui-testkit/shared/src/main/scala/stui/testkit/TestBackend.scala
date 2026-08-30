@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, CellUpdate}
 import stui.core.geometry.{Position, Rect, Size}
-import stui.core.spi.{TerminalBackend, TerminalError, TerminalOptions}
+import stui.core.spi.{PrintEffect, TerminalBackend, TerminalError, TerminalOptions}
 import stui.unicode.WidthPolicy
 
 import java.util.concurrent.atomic.AtomicReference
@@ -37,12 +37,19 @@ enum BackendCall derives Eq, Show, Hash {
   * @author Kevin Lee
   * @since 2026-08-24
   */
-final class TestBackend private (private val ref: AtomicReference[TestBackend.State], val policy: WidthPolicy) extends TerminalBackend {
+final class TestBackend private (
+  private val ref: AtomicReference[TestBackend.State],
+  val policy: WidthPolicy,
+  private val printEffect: PrintEffect,
+) extends TerminalBackend {
 
   /* the methods live in the class body because they implement the TerminalBackend trait members */
 
   /** The current screen size. Not logged (see [[BackendCall]]). */
   override def size(): Size = ref.get().buffer.area.size
+
+  /** The harness viewport override when set, the whole screen otherwise. Not logged. */
+  override def viewport(): Rect = ref.get().viewportOverride.getOrElse(Rect.sized(size()))
 
   /** Applies the updates to the screen and logs [[BackendCall.Draw]]. */
   override def draw(updates: Vector[CellUpdate]): Unit =
@@ -74,9 +81,13 @@ final class TestBackend private (private val ref: AtomicReference[TestBackend.St
       state.copy(buffer = Buffer.emptyWith(policy, state.buffer.area), calls = state.calls :+ BackendCall.Clear)
     ): Unit
 
-  /** Appends the rows to the printed scrollback and logs [[BackendCall.Print]]. */
-  override def print(rows: Buffer): Unit =
+  /** Appends the rows to the printed scrollback, logs [[BackendCall.Print]], and returns the configured effect
+    * (`ViewportKept` from [[TestBackend.of]], the given one from [[TestBackend.printing]]).
+    */
+  override def print(rows: Buffer): PrintEffect = {
     ref.updateAndGet(state => state.copy(printed = state.printed :+ rows, calls = state.calls :+ BackendCall.Print(rows))): Unit
+    printEffect
+  }
 
   /** Remembers the options, logs [[BackendCall.Enter]], and always succeeds. */
   override def enter(options: TerminalOptions): Either[TerminalError, Unit] = {
@@ -94,7 +105,7 @@ final class TestBackend private (private val ref: AtomicReference[TestBackend.St
 
 object TestBackend {
 
-  /** The complete observable state of a [[TestBackend]] at one moment. */
+  /** The complete observable state of a [[TestBackend]] at one moment (`viewportOverride` is the harness-set inline viewport). */
   final case class State(
     buffer: Buffer,
     cursor: Position,
@@ -102,13 +113,21 @@ object TestBackend {
     entered: Option[TerminalOptions],
     printed: Vector[Buffer],
     calls: Vector[BackendCall],
+    viewportOverride: Option[Rect],
   )
 
-  /** A backend with a blank screen of the size at the origin, the cursor hidden at the origin, and [[WidthPolicy.default]]. */
+  /** A backend with a blank screen of the size at the origin, the cursor hidden at the origin, [[WidthPolicy.default]], and prints
+    * that keep the viewport.
+    */
   def of(size: Size): TestBackend = ofWith(WidthPolicy.default, size)
 
   /** [[of]] with the given policy. */
-  def ofWith(policy: WidthPolicy, size: Size): TestBackend =
+  def ofWith(policy: WidthPolicy, size: Size): TestBackend = make(policy, size, PrintEffect.ViewportKept)
+
+  /** [[of]] with the given print effect (an overlay-printing backend for orchestration tests). */
+  def printing(effect: PrintEffect, size: Size): TestBackend = make(WidthPolicy.default, size, effect)
+
+  private def make(policy: WidthPolicy, size: Size, printEffect: PrintEffect): TestBackend =
     new TestBackend(
       new AtomicReference(
         State(
@@ -118,9 +137,11 @@ object TestBackend {
           none[TerminalOptions],
           Vector.empty[Buffer],
           Vector.empty[BackendCall],
+          none[Rect],
         )
       ),
       policy,
+      printEffect,
     )
 
   extension (backend: TestBackend) {
@@ -145,6 +166,14 @@ object TestBackend {
 
     /** The rows every `print` emitted, in order (the scrollback). */
     def printed: Vector[Buffer] = backend.state.printed
+
+    /** The test harness viewport override: subsequent draws render over this rect (an inline viewport inside the screen), nothing
+      * logged.
+      */
+    def setViewport(rect: Rect): Unit = backend.ref.updateAndGet(_.copy(viewportOverride = rect.some)): Unit
+
+    /** Removes the viewport override, nothing logged. */
+    def clearViewport(): Unit = backend.ref.updateAndGet(_.copy(viewportOverride = none[Rect])): Unit
 
     /** The test harness resize: a blank screen of the new size, the cursor kept, nothing logged (a real resize reaches the render
       * loop as an event, not as a backend call).

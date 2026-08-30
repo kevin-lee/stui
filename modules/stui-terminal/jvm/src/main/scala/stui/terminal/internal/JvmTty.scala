@@ -44,7 +44,10 @@ final class JvmTty private (private val saved: AtomicReference[Option[Array[Byte
     out.flush()
   }
 
-  override def enterRawMode(): Either[TerminalError, Unit] = {
+  override def enterRawMode(): Either[TerminalError, Unit] = if (saved.get().isDefined) {
+    /* already raw: the first save wins and restoreMode restores it once (the platform runner enters before the backend does) */
+    ().asRight[TerminalError]
+  } else {
     /* the blob tcgetattr fills and cfmakeraw edits (the documented mutation sites) */
     val original = new Array[Byte](JvmTty.TermiosBytes)
     val got      = LibC.tcgetattr(0, original)

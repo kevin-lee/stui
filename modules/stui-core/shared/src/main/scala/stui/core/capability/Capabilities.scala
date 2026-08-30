@@ -126,7 +126,30 @@ object Capabilities {
     )
   }
 
+  /** The three-layer merge (design doc 7.3, decision D15): the environment value, then the probe results, then the application
+    * overrides, with the no-upgrade law that a field differs from the environment value only when one of the patches names it.
+    */
+  def merge(env: Capabilities, probes: CapabilitiesPatch, overrides: CapabilitiesPatch): Capabilities =
+    env.patched(probes |+| overrides)
+
   extension (capabilities: Capabilities) {
+
+    /** The capabilities with every field the patch names replaced (design doc 7.3, decision D15). */
+    def patched(patch: CapabilitiesPatch): Capabilities =
+      Capabilities(
+        patch.colors.getOrElse(capabilities.colors),
+        patch.syncOutput.getOrElse(capabilities.syncOutput),
+        patch.kittyKeyboard.getOrElse(capabilities.kittyKeyboard),
+        patch.sgrMouse.getOrElse(capabilities.sgrMouse),
+        patch.focusEvents.getOrElse(capabilities.focusEvents),
+        patch.scrollRegionsSafe.getOrElse(capabilities.scrollRegionsSafe),
+        patch.extendedUnderline.getOrElse(capabilities.extendedUnderline),
+        patch.multiplexer.getOrElse(capabilities.multiplexer),
+        patch.ssh.getOrElse(capabilities.ssh),
+        patch.glyphs.getOrElse(capabilities.glyphs),
+        patch.ambiguousWide.getOrElse(capabilities.ambiguousWide),
+        patch.vs16Width.getOrElse(capabilities.vs16Width),
+      )
 
     /** The capabilities with the colour profile replaced (an application override, design doc 7.3). */
     def withColors(profile: ColorProfile): Capabilities = capabilities.copy(colors = profile)

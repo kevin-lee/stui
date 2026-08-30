@@ -6,7 +6,7 @@ import hedgehog.runner.*
 import refined4s.types.numeric.{NonNegInt, PosInt}
 import stui.core.buffer.{Buffer, CellUpdate}
 import stui.core.event.{Event, KeyCode, KeyEvent}
-import stui.core.geometry.{Position, Size}
+import stui.core.geometry.{Position, Rect, Size}
 import stui.testkit.Assertions
 import stui.unicode.internal.IntOps.*
 
@@ -26,6 +26,7 @@ object SpiSpec extends Properties {
     private def record(call: String): Unit               = calls.updateAndGet(_ :+ call): Unit
     def recorded: Vector[String]                         = calls.get()
     override def size(): Size                            = Size(NonNegInt(80), NonNegInt(24))
+    override def viewport(): Rect                        = Rect.sized(size())
     override def draw(updates: Vector[CellUpdate]): Unit = record(s"draw(${updates.length.toString})")
     override def flush(): NonNegInt                      = {
       record("flush")
@@ -35,7 +36,10 @@ object SpiSpec extends Properties {
     override def showCursor(): Unit                      = record("showCursor")
     override def hideCursor(): Unit                      = record("hideCursor")
     override def clear(): Unit                           = record("clear")
-    override def print(rows: Buffer): Unit               = record(s"print(${rows.area.height.value.toString})")
+    override def print(rows: Buffer): PrintEffect        = {
+      record(s"print(${rows.area.height.value.toString})")
+      PrintEffect.ViewportKept
+    }
     override def enter(options: TerminalOptions): Either[TerminalError, Unit] = {
       record(s"enter(${options.features.size.toString})")
       ().asRight[TerminalError]
@@ -61,6 +65,8 @@ object SpiSpec extends Properties {
     example("TerminalOptions.of enables exactly the given features", testOptions),
     example("ScreenMode.inlineFrom rejects 0 and accepts 5", testInlineFrom),
     example("EscTimeout resolves 50 ms locally, 200 ms over ssh, and a fixed value as given", testEscTimeout),
+    example("Probing resolves 100 ms locally, 1 s over ssh, a fixed value, and nothing when disabled", testProbing),
+    example("TerminalOptions carries the print bound and the probing policy", testPrintOptions),
   )
 
   def testDraw: Result = {
@@ -68,7 +74,7 @@ object SpiSpec extends Properties {
     val entered = backend.enter(TerminalOptions.alternateScreen.withFeature(TerminalFeature.MouseCapture))
     backend.draw(Buffer.diff(Buffer.fromLines(Vector("hello")), Buffer.fromLines(Vector("hallo"))))
     val flushed = backend.flush()
-    backend.print(Buffer.fromLines(Vector("a", "b")))
+    backend.print(Buffer.fromLines(Vector("a", "b"))): Unit
     backend.exit()
     Result.all(
       List(
@@ -115,6 +121,26 @@ object SpiSpec extends Properties {
         Result.assert(ScreenMode.inlineFrom(-1).isLeft),
         Assertions.eqv(ScreenMode.inlineFrom(5), Right(ScreenMode.Inline(PosInt(5)))),
         Assertions.eqv(ScreenMode.inlineOf(PosInt(5)), ScreenMode.Inline(PosInt(5))),
+      )
+    )
+
+  def testProbing: Result =
+    Result.all(
+      List(
+        Assertions.eqv(Probing.Automatic.resolve(false), Probing.localDefault.some),
+        Assertions.eqv(Probing.Automatic.resolve(true), Probing.sshDefault.some),
+        Assertions.eqv(Probing.fixed(2.seconds).resolve(true), 2.seconds.some),
+        Assertions.eqv((Probing.Disabled: Probing).resolve(false), none[FiniteDuration]),
+      )
+    )
+
+  def testPrintOptions: Result =
+    Result.all(
+      List(
+        Assertions.eqv(TerminalOptions.alternateScreen.printBufferRows, TerminalOptions.defaultPrintBufferRows),
+        Assertions.eqv(TerminalOptions.alternateScreen.probing, (Probing.Automatic: Probing)),
+        Assertions.eqv(TerminalOptions.alternateScreen.withPrintBufferRows(PosInt(10)).printBufferRows, PosInt(10)),
+        Assertions.eqv(TerminalOptions.alternateScreen.withProbing(Probing.Disabled).probing, (Probing.Disabled: Probing)),
       )
     )
 

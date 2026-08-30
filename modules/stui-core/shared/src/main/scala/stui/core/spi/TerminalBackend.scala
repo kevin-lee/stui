@@ -2,7 +2,7 @@ package stui.core.spi
 
 import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, CellUpdate}
-import stui.core.geometry.{Position, Size}
+import stui.core.geometry.{Position, Rect, Size}
 
 /** What a platform backend provides to the rendering loop (design doc 6.3). Synchronous and effect-free, the effect adapters lift it.
   *
@@ -11,8 +11,14 @@ import stui.core.geometry.{Position, Size}
   */
 trait TerminalBackend {
 
-  /** The current terminal size in cells. */
+  /** The full terminal size in cells (the print channel renders at this width and height). */
   def size(): Size
+
+  /** The screen area the UI occupies, in screen coordinates: the whole terminal at the origin on the alternate screen, the last rows
+    * of the normal screen in inline mode (recomputed when the terminal size changes). The orchestration renders every frame over
+    * exactly this rect (design doc 7.2, decision D12).
+    */
+  def viewport(): Rect
 
   /** Writes the changed cells of a frame, the output of `Buffer.diff` in row-major order. A `Continuation` update means "this column is
     * the shadow of the glyph to its left", the backend decides whether to emit anything for it (design doc 9.3).
@@ -36,11 +42,12 @@ trait TerminalBackend {
   /** Clears the whole screen. */
   def clear(): Unit
 
-  /** Emits rows above the viewport into scrollback in inline mode (M1f). Under the alternate screen the orchestration buffers prints
-    * instead and calls this only when flushing the transcript after restore (M1f). The M1e writer emits the rows as styled lines with
-    * CR LF at the cursor.
+  /** Emits the rows above the viewport in inline mode (`ViewportKept` under the scroll-region strategy, `ViewportLost` when the
+    * viewport was overwritten or moved and the orchestration must redraw it), or as styled lines at the cursor outside inline mode
+    * (the transcript flush after restore under the alternate screen, design doc 7.2, decision D13). Rows wider than the terminal are
+    * truncated at the terminal width.
     */
-  def print(rows: Buffer): Unit
+  def print(rows: Buffer): PrintEffect
 
   /** Enters raw mode, the screen mode, and the requested features, restored by [[exit]]. `Left` when standard input is not a terminal,
     * the screen mode is unsupported, or a platform call fails, in which case nothing was changed.

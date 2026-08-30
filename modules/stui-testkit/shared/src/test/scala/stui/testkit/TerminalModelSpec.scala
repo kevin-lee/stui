@@ -75,7 +75,7 @@ object TerminalModelSpec extends Properties {
       Assertions.eqv(TerminalModel.interpret(default, blank(1, 1), csi + "99m"), Left(ModelError.Unknown("SGR 99"))),
     ),
     example("a TAB is unknown", Assertions.eqv(TerminalModel.interpret(default, blank(1, 1), "\t"), Left(ModelError.Unknown("9")))),
-    example("a lone ESC is unknown", Result.assert(TerminalModel.interpret(default, blank(1, 1), esc + "7").isLeft)),
+    example("an unknown escape is refused", Result.assert(TerminalModel.interpret(default, blank(1, 1), esc + "Z").isLeft)),
     example(
       "CUP outside the viewport is refused",
       Assertions.eqv(TerminalModel.interpret(default, blank(10, 5), cup(40, 1)), Left(ModelError.OutsideViewport(at(0, 39)))),
@@ -89,8 +89,137 @@ object TerminalModelSpec extends Properties {
       Assertions.eqv(TerminalModel.interpret(default, blank(1, 1), csi + "?25l").map(_.cursorVisible), Right(false)),
     ),
     example("?1049h clears under a clearing profile and keeps under the other", testAlternateEntry),
-    example("an unknown private mode is refused", Result.assert(TerminalModel.interpret(default, blank(1, 1), csi + "?2026h").isLeft)),
+    example("an unknown private mode is refused", Result.assert(TerminalModel.interpret(default, blank(1, 1), csi + "?1234h").isLeft)),
+    example(
+      "?2026h records the mode",
+      Assertions.eqv(TerminalModel.interpret(default, blank(1, 1), csi + "?2026h").map(_.modes), Right(Set(2026))),
+    ),
+    example("DECSTBM sets the region and homes the cursor", testRegionSet),
+    example("CSI r clears the region and homes the cursor", testRegionReset),
+    example("invalid margins are refused", Result.assert(TerminalModel.interpret(default, blank(3, 5), csi + "5;2r").isLeft)),
+    example("DECSC and DECRC round-trip the cursor, the wrap flag, and the style", testSaveRestore),
+    example("DECRC without a save homes with defaults", testRestoreWithoutSave),
+    example("a line feed at the region bottom scrolls the region into scrollback", testRegionScroll),
+    example("a region below row one keeps its scrolled rows out of scrollback", testRegionScrollNoKeep),
+    example("the alternate screen never reaches scrollback", testAlternateScroll),
+    example("a line feed at the screen bottom scrolls the normal screen into scrollback", testScreenScroll),
+    example("a line feed at the screen bottom outside the region is refused", testOutsideRegionScroll),
+    example("CSI J erases from the cursor to the end of the screen", testEraseBelow),
+    example("CSI K erases from the cursor to the end of the row", testEraseLine),
   )
+
+  private def lines(ss: String*): Screen = {
+    val buffer = Buffer.fromLines(ss.toVector)
+    Screen.blank(default, buffer.area.size).copy(buffer = buffer)
+  }
+
+  def testRegionSet: Result =
+    TerminalModel.interpret(default, lines("ab", "cd", "ef").copy(cursor = at(1, 1)), csi + "1;2r") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(screen.region, TerminalModel.Region(NonNegInt(0), NonNegInt(1)).some),
+            Assertions.eqv(screen.cursor, at(0, 0)),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testRegionReset: Result =
+    TerminalModel.interpret(default, lines("ab", "cd", "ef").copy(cursor = at(1, 1)), csi + "1;2r" + csi + "1;2H" + csi + "r") match {
+      case Right(screen) =>
+        Result.all(List(Assertions.eqv(screen.region, none[TerminalModel.Region]), Assertions.eqv(screen.cursor, at(0, 0))))
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testSaveRestore: Result =
+    TerminalModel.interpret(default, lines("abc", "def"), cup(2, 2) + csi + "31m" + esc + "7" + cup(1, 1) + csi + "0m" + esc + "8") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(screen.cursor, at(1, 1)),
+            Assertions.eqv(screen.style.fg, Color.Red),
+            Result.assert(!screen.pendingWrap),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testRestoreWithoutSave: Result =
+    TerminalModel.interpret(
+      default,
+      lines("abc", "def").copy(cursor = at(2, 1), style = CellStyle.default.copy(fg = Color.Red)),
+      esc + "8",
+    ) match {
+      case Right(screen) =>
+        Result.all(List(Assertions.eqv(screen.cursor, at(0, 0)), Assertions.eqv(screen.style, CellStyle.default)))
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testRegionScroll: Result =
+    TerminalModel.interpret(default, lines("aa", "bb", "cc"), csi + "1;2r" + cup(2, 1) + "\n") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("bb", "  ", "cc")),
+            Assertions.eqv(screen.scrollback.map(_.map(_.symbolOption.fold(" ")(_.value)).mkString), Vector("aa")),
+            Assertions.eqv(screen.cursor, at(0, 1)),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testRegionScrollNoKeep: Result =
+    TerminalModel.interpret(default, lines("aa", "bb", "cc", "dd"), csi + "2;3r" + cup(3, 1) + "\n") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("aa", "cc", "  ", "dd")),
+            Assertions.eqv(screen.scrollback, Vector.empty[Vector[Cell]]),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testAlternateScroll: Result =
+    TerminalModel.interpret(default, lines("aa", "bb", "cc").copy(alternate = true), csi + "1;2r" + cup(2, 1) + "\n") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("bb", "  ", "cc")),
+            Assertions.eqv(screen.scrollback, Vector.empty[Vector[Cell]]),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testScreenScroll: Result =
+    TerminalModel.interpret(default, lines("aa", "bb"), cup(2, 1) + "\n") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("bb", "  ")),
+            Assertions.eqv(screen.scrollback.map(_.map(_.symbolOption.fold(" ")(_.value)).mkString), Vector("aa")),
+            Assertions.eqv(screen.cursor, at(0, 1)),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testOutsideRegionScroll: Result =
+    Result.assert(TerminalModel.interpret(default, lines("aa", "bb", "cc"), csi + "1;2r" + cup(3, 1) + "\n").isLeft)
+
+  def testEraseBelow: Result =
+    TerminalModel.interpret(default, lines("abc", "def"), cup(1, 2) + csi + "J") match {
+      case Right(screen) => Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("a  ", "   "))
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testEraseLine: Result =
+    TerminalModel.interpret(default, lines("abc", "def"), cup(1, 2) + csi + "K") match {
+      case Right(screen) => Assertions.eqv(Buffer.renderRows(screen.buffer), Vector("a  ", "def"))
+      case Left(error) => Result.failure.log(error.show)
+    }
 
   def testNarrowVs16: Result = {
     val vs16   = cps(0x2328, 0xfe0f)

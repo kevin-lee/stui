@@ -1,9 +1,10 @@
 package stui.terminal.ansi
 
 import cats.syntax.all.*
+import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, Cell, CellUpdate, GlyphSymbol}
 import stui.core.capability.Capabilities
-import stui.core.geometry.{Position, Rect}
+import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.spi.TerminalOptions
 import stui.core.style.CellStyle
@@ -12,8 +13,9 @@ import stui.unicode.internal.IntOps.*
 import scala.annotation.tailrec
 
 /** The pure ANSI writer with the explicit cursor model of design doc 7.1 (decision D16). Every function maps a [[WriterState]] and its
-  * input to the next state and the text to send (its UTF-8 encoding is the wire form). Rules, each a law over the testkit's
-  * `TerminalModel` oracle:
+  * input to the next state and the text to send (its UTF-8 encoding is the wire form). The viewport is a screen-coordinate `Rect`
+  * (plan refinement R1 of M1f): update positions are absolute rows, the whole terminal on the alternate screen and the last rows of
+  * the normal screen in inline mode, always spanning the terminal width. Rules, each a law over the testkit's `TerminalModel` oracle:
   *
   *   - R1: after a write in the last column the tracked cursor is `PendingWrap`, and the next move is absolute.
   *   - R2: consecutive updates advance by the glyph's terminal width without a cursor move, a `Continuation` update whose owner was
@@ -23,11 +25,15 @@ import scala.annotation.tailrec
   *   - R4: a control never reaches the terminal as a glyph (impossible by the `GlyphSymbol` type).
   *   - R5: only the SGR parameters that differ from the tracked style are emitted, on the capability-normalised style, and the style is
   *     reset at the end of a present when it is not the default.
-  *   - R6 and R7 (the DEC 2026 bracket and the scroll-region reset) are M1f, the state carries their fields.
+  *   - R6: the DEC 2026 bracket wraps the flush (the backend emits it, plan refinement R9), never any safe reset.
+  *   - R7: DECSTBM homes the cursor, so the region is only ever set or reset inside the DECSC / DECRC bracket
+  *     ([[Sequences.armRegion]], [[Sequences.resetRegion]], [[exitInline]]).
   *   - R8: nothing is emitted for an update outside the viewport.
   *   - R9 is the orchestration's (cleanup errors outrank emission errors).
   *   - R10: the text of a present is at most [[MaxBytesPerCell]] bytes per update plus the UTF-8 length of the glyph symbols written
-  *     plus [[MaxBytesPerPresent]].
+  *     plus [[MaxBytesPerPresent]]; the text of a print is at most [[MaxBytesPerCell]] per emitted cell plus the symbol bytes plus
+  *     [[MaxBytesPerPrintedRow]] per row plus [[MaxBytesPerPrint]] (the overlay adds at most the terminal height in scroll line
+  *     feeds).
   *
   * A VS16 cluster advances by `Capabilities.vs16Width`, and when that is narrower than the cell the shadow column is painted with a
   * space in the cell's style, so the tracked cursor and the screen agree on every terminal (design doc 9.3).
@@ -45,36 +51,35 @@ object AnsiWriter {
   /** The byte budget per present beyond the updates (rule R10): the final style reset. */
   val MaxBytesPerPresent: Int = 8
 
+  /** The byte budget per printed row beyond its cells (rule R10): the row separator (2), a style reset (4), and Erase in Line (3). */
+  val MaxBytesPerPrintedRow: Int = 12
+
+  /** The byte budget per print beyond the rows (rule R10): one Cursor Position (at most 24) and Erase in Display (3). */
+  val MaxBytesPerPrint: Int = 32
+
   final private case class Acc(cursor: CursorState, style: CellStyle, lastWide: Option[Position])
 
-  /** Emits the updates of one present over the viewport (whose origin is the screen row `state.origin`) and returns the state with the
-    * tracked cursor after the last write and the default style.
+  /** Emits the updates of one present over the screen-coordinate viewport and returns the state with the tracked cursor after the
+    * last write and the default style.
     */
   def present(state: WriterState, capabilities: Capabilities, viewport: Rect, updates: Vector[CellUpdate]): (WriterState, String) = {
     val builder = new java.lang.StringBuilder
-    val end     = loop(
-      IArray.from(updates),
-      0,
-      Acc(state.cursor, state.style, none[Position]),
-      builder,
-      capabilities,
-      viewport.width.value,
-      viewport.height.value,
-      state.origin.value,
-    )
+    val end     = loop(IArray.from(updates), 0, Acc(state.cursor, state.style, none[Position]), builder, capabilities, viewport)
     if (end.style =!= CellStyle.default) builder.append(Sequences.SgrReset): Unit else ()
     (state.copy(cursor = end.cursor, style = CellStyle.default), builder.toString)
   }
 
   /** A Cursor Position to the position clamped into the viewport, nothing when the tracked cursor is already there. */
   def moveCursor(state: WriterState, viewport: Rect, position: Position): (WriterState, String) = {
-    val x      = math.max(0, math.min(position.x.value, viewport.width.value - 1))
-    val y      = math.max(0, math.min(position.y.value, viewport.height.value - 1))
-    val target = Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong))
+    val rightEdge  = viewport.x.value.toLong + viewport.width.value.toLong - 1L
+    val bottomEdge = viewport.y.value.toLong + viewport.height.value.toLong - 1L
+    val x          = NonNegInts.clamp(math.max(viewport.x.value.toLong, math.min(position.x.value.toLong, rightEdge)))
+    val y          = NonNegInts.clamp(math.max(viewport.y.value.toLong, math.min(position.y.value.toLong, bottomEdge)))
+    val target     = Position(x, y)
     state.cursor match {
       case CursorState.Known(current) if current === target => (state, "")
       case CursorState.Known(_) | CursorState.PendingWrap(_) | CursorState.Unknown =>
-        (state.copy(cursor = CursorState.Known(target)), Sequences.cup(state.origin.value + y + 1, x + 1))
+        (state.copy(cursor = CursorState.Known(target)), Sequences.cup(y.value + 1, x.value + 1))
     }
   }
 
@@ -84,74 +89,228 @@ object AnsiWriter {
   /** DECTCEM reset, the state is unchanged. */
   def hideCursor(state: WriterState): (WriterState, String) = (state, Sequences.CursorHide)
 
-  /** Erase in Display and home, the tracked cursor becomes the viewport origin. */
-  def clear(state: WriterState): (WriterState, String) =
+  /** Erase in Display and home (the alternate screen), the tracked cursor becomes the origin. */
+  def clearAll(state: WriterState): (WriterState, String) =
     (state.copy(cursor = CursorState.Known(Position.origin)), Sequences.ClearScreen + Sequences.CursorHome)
+
+  /** A move to the viewport's first row and Erase in Display below it (the inline clear: never a full-screen clear, design doc 7.2),
+    * the tracked cursor becomes the viewport's position.
+    */
+  def clearViewport(state: WriterState, viewport: Rect): (WriterState, String) =
+    (
+      state.copy(cursor = CursorState.Known(viewport.position)),
+      Sequences.cup(viewport.y.value + 1, viewport.x.value + 1) + Sequences.EraseBelow,
+    )
 
   /** The entry sequence of [[Sequences.enter]] and the initial state with the cursor known at the origin (the sequence homes it). */
   def enter(options: TerminalOptions): (WriterState, String) =
     (WriterState.initial.copy(cursor = CursorState.Known(Position.origin)), Sequences.enter(options))
 
-  /** The fixed reset of every exit path, [[Sequences.SafeReset]]. */
+  /** The inline entry (design doc 7.2, never a full-screen clear): a carriage return to column 1, `pad` line feeds (the entry
+    * scroll), the cursor hidden, the features, and the region armed through the DECSC / DECRC bracket when the scroll-region
+    * strategy applies (rule R7). The tracked cursor is unknown afterwards.
+    */
+  def enterInline(options: TerminalOptions, pad: Int, region: Option[ScrollRegion]): (WriterState, String) = {
+    val armed = region.fold("")(r => Sequences.armRegion(r.top.value + 1, r.bottom.value + 1))
+    (
+      WriterState(CursorState.Unknown, CellStyle.default, region),
+      Sequences.Cr + (Sequences.Lf * pad) + Sequences.CursorHide + Sequences.features(options) + armed,
+    )
+  }
+
+  /** The fixed reset of every alternate-screen exit path, [[Sequences.SafeReset]]. */
   val exit: String = Sequences.SafeReset
 
-  /** The rows as styled lines at the cursor: each row's cells left to right with style deltas (the same cell emitter, no cursor moves),
-    * a style reset when needed, then CR LF. The tracked cursor is unknown afterwards.
+  /** The fixed reset of every inline exit path (design doc 7.2): the feature modes off in reverse order, the style reset, the cursor
+    * shown, the region reset through the DECSC / DECRC bracket (rule R7), and the cursor parked at column 1 of the row below the
+    * viewport (a CR LF from the viewport's last row, which scrolls one line when the viewport touches the terminal bottom, leaving
+    * the last frame visible as history). Never `CSI ? 1049 l` (mode 1049 reset restores the cursor as DECRC on the normal screen).
+    */
+  def exitInline(viewport: Rect): String =
+    Sequences.FocusDisable + Sequences.BracketedPasteDisable + Sequences.MouseTrackingDisable + Sequences.SgrReset +
+      Sequences.CursorShow + Sequences.resetRegion + Sequences.cup(viewport.y.value + viewport.height.value, 1) + Sequences.CrLf
+
+  /** The rows as styled lines at the cursor (the transcript flush after restore, design doc 7.2): each row's cells up to the last
+    * non-blank one, a style reset when needed, Erase in Line (a short row leaves no residue, plan refinement R4), and CR LF. The
+    * tracked cursor is unknown afterwards.
     */
   def print(state: WriterState, capabilities: Capabilities, rows: Buffer): (WriterState, String) = {
     val builder = new java.lang.StringBuilder
     val width   = rows.area.width.value
-    val style   = printRows(rows.cells, 0, width, rows.area.height.value, state.style, builder, capabilities)
-    (state.copy(cursor = CursorState.Unknown, style = style), builder.toString)
+    transcriptRows(rows.cells, 0, width, rows.area.height.value, state.style, builder, capabilities, width)
+    (state.copy(cursor = CursorState.Unknown, style = CellStyle.default), builder.toString)
+  }
+
+  /** The scroll-region print (design doc 7.2, the viewport untouched): a move to the region's bottom row, then per row a line feed
+    * (the region scrolls up, its top row reaching scrollback), a carriage return, and the row through the shared emitter. The
+    * tracked cursor is unknown afterwards, the region stays armed.
+    */
+  def printRegion(
+    state: WriterState,
+    capabilities: Capabilities,
+    region: ScrollRegion,
+    terminalWidth: Int,
+    rows: Buffer,
+  ): (WriterState, String) = {
+    val builder = new java.lang.StringBuilder
+    builder.append(Sequences.cup(region.bottom.value + 1, 1)): Unit
+    regionRows(rows.cells, 0, rows.area.width.value, rows.area.height.value, state.style, builder, capabilities, terminalWidth)
+    (state.copy(cursor = CursorState.Unknown, style = CellStyle.default), builder.toString)
+  }
+
+  /** The overlay print (design doc 7.2, the always-correct baseline): a move to the viewport's first row, Erase in Display below it,
+    * the rows each followed by CR LF, and the line feeds that scroll the screen until the viewport fits below the printed rows.
+    * Returns the moved viewport (the caller reports the viewport lost, so the next present redraws it). The tracked cursor is
+    * unknown afterwards.
+    */
+  def printOverlay(
+    state: WriterState,
+    capabilities: Capabilities,
+    viewport: Rect,
+    terminal: Size,
+    rows: Buffer,
+  ): (WriterState, Rect, String) = {
+    val n = rows.area.height.value
+    if (n === 0) {
+      (state, viewport, "")
+    } else {
+      val builder = new java.lang.StringBuilder
+      val o       = viewport.y.value
+      val h       = viewport.height.value
+      val termH   = terminal.height.value
+      builder.append(Sequences.cup(o + 1, 1)).append(Sequences.EraseBelow): Unit
+      overlayRows(rows.cells, 0, rows.area.width.value, n, state.style, builder, capabilities, terminal.width.value)
+      val c1      = math.min(o + n, termH - 1)
+      val o2      = math.min(o + n, termH - h)
+      val s2      = (o + n - o2) - (o + n - c1)
+      val extra   = if (s2 > 0) (termH - 1 - c1) + s2 else 0
+      builder.append(Sequences.Lf * extra): Unit
+      val moved   = Rect(NonNegInt(0), NonNegInts.clamp(o2.toLong), terminal.width, viewport.height)
+      (state.copy(cursor = CursorState.Unknown, style = CellStyle.default), moved, builder.toString)
+    }
   }
 
   @tailrec
-  private def printRows(
+  private def transcriptRows(
     cells: IArray[Cell],
     y: Int,
-    width: Int,
+    rowWidth: Int,
     height: Int,
     style: CellStyle,
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
-  ): CellStyle =
+    limit: Int,
+  ): Unit =
     if (y >= height) {
-      style
+      ()
     } else {
-      val after = printCells(cells, y * width, (y + 1) * width, style, builder, capabilities)
-      val reset =
-        if (after =!= CellStyle.default) {
-          builder.append(Sequences.SgrReset): Unit
-          CellStyle.default
-        } else {
-          after
-        }
+      val next = emitRow(cells, y * rowWidth, rowWidth, limit, style, builder, capabilities)
       builder.append(Sequences.CrLf): Unit
-      printRows(cells, y + 1, width, height, reset, builder, capabilities)
+      transcriptRows(cells, y + 1, rowWidth, height, next, builder, capabilities, limit)
     }
 
   @tailrec
-  private def printCells(
+  private def regionRows(
     cells: IArray[Cell],
-    i: Int,
-    end: Int,
+    y: Int,
+    rowWidth: Int,
+    height: Int,
+    style: CellStyle,
+    builder: java.lang.StringBuilder,
+    capabilities: Capabilities,
+    limit: Int,
+  ): Unit =
+    if (y >= height) {
+      ()
+    } else {
+      builder.append(Sequences.Lf).append(Sequences.Cr): Unit
+      val next = emitRow(cells, y * rowWidth, rowWidth, limit, style, builder, capabilities)
+      regionRows(cells, y + 1, rowWidth, height, next, builder, capabilities, limit)
+    }
+
+  @tailrec
+  private def overlayRows(
+    cells: IArray[Cell],
+    y: Int,
+    rowWidth: Int,
+    height: Int,
+    style: CellStyle,
+    builder: java.lang.StringBuilder,
+    capabilities: Capabilities,
+    limit: Int,
+  ): Unit =
+    if (y >= height) {
+      ()
+    } else {
+      val next = emitRow(cells, y * rowWidth, rowWidth, limit, style, builder, capabilities)
+      builder.append(Sequences.CrLf): Unit
+      overlayRows(cells, y + 1, rowWidth, height, next, builder, capabilities, limit)
+    }
+
+  /** Emits one printed row: the cells up to the last non-blank one (style deltas, the VS16 shadow, a wide glyph straddling the limit
+    * as a space in its style), truncated at `limit` columns, then the style reset when the tracked style is not the default, then
+    * Erase in Line when fewer than `limit` columns were written (plan refinement R4; a full row needs no erase, and with the cursor
+    * on the last column under a pending wrap the erase would blank the cell just written). Returns the tracked style, always the
+    * default.
+    */
+  private def emitRow(
+    cells: IArray[Cell],
+    rowStart: Int,
+    rowWidth: Int,
+    limit: Int,
+    style: CellStyle,
+    builder: java.lang.StringBuilder,
+    capabilities: Capabilities,
+  ): CellStyle = {
+    val width   = math.min(rowWidth, limit)
+    val count   = lastNonBlank(cells, rowStart, width)
+    val tracked = emitRowCells(cells, rowStart, 0, count, limit, style, builder, capabilities)
+    val reset   =
+      if (tracked =!= CellStyle.default) {
+        builder.append(Sequences.SgrReset): Unit
+        CellStyle.default
+      } else {
+        tracked
+      }
+    if (count < limit) builder.append(Sequences.EraseToLineEnd): Unit else ()
+    reset
+  }
+
+  @tailrec
+  private def lastNonBlank(cells: IArray[Cell], rowStart: Int, width: Int): Int =
+    if (width <= 0) 0
+    else if (cells(rowStart + width - 1) =!= Cell.blank) width
+    else lastNonBlank(cells, rowStart, width - 1)
+
+  @tailrec
+  private def emitRowCells(
+    cells: IArray[Cell],
+    rowStart: Int,
+    c: Int,
+    count: Int,
+    limit: Int,
     style: CellStyle,
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
   ): CellStyle =
-    if (i >= end) {
+    if (c >= count) {
       style
     } else {
-      val next = cells(i) match {
+      val next = cells(rowStart + c) match {
         case Cell.Continuation(_) => style
-        case Cell.Glyph(symbol, width, cellStyle) =>
-          val tracked       = ensureStyle(style, builder, capabilities, cellStyle)
-          val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else width.columns
-          builder.append(symbol.value): Unit
-          appendSpaces(builder, width.columns - terminalWidth)
-          tracked
+        case Cell.Glyph(symbol, glyphWidth, cellStyle) =>
+          val tracked = ensureStyle(style, builder, capabilities, cellStyle)
+          if (glyphWidth.columns === 2 && c + 1 >= limit) {
+            builder.append(' '): Unit
+            tracked
+          } else {
+            val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else glyphWidth.columns
+            builder.append(symbol.value): Unit
+            appendSpaces(builder, glyphWidth.columns - terminalWidth)
+            tracked
+          }
       }
-      printCells(cells, i + 1, end, next, builder, capabilities)
+      emitRowCells(cells, rowStart, c + 1, count, limit, next, builder, capabilities)
     }
 
   @tailrec
@@ -161,43 +320,41 @@ object AnsiWriter {
     acc: Acc,
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
-    width: Int,
-    height: Int,
-    origin: Int,
+    viewport: Rect,
   ): Acc =
     if (i >= updates.length) {
       acc
     } else {
       val update = updates(i)
-      val x      = update.position.x.value
-      val y      = update.position.y.value
       val next   =
-        if (x >= width || y >= height) {
+        if (!viewport.contains(update.position)) {
           acc
         } else {
+          val x     = update.position.x.value
+          val y     = update.position.y.value
+          val right = viewport.x.value.toLong + viewport.width.value.toLong
           update.cell match {
             case Cell.Continuation(_) =>
               if (acc.lastWide.exists(owner => owner.x.value === x - 1 && owner.y.value === y)) acc
-              else emitGlyph(acc, builder, capabilities, width, origin, x, y, GlyphSymbol.space, 1, CellStyle.default, 1)
+              else emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, CellStyle.default, 1)
             case Cell.Glyph(symbol, glyphWidth, style) =>
               val columns = glyphWidth.columns
-              if (columns === 2 && x + 1 >= width) {
-                emitGlyph(acc, builder, capabilities, width, origin, x, y, GlyphSymbol.space, 1, style, 1)
+              if (columns === 2 && x.toLong + 1L >= right) {
+                emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, style, 1)
               } else {
                 val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else columns
-                emitGlyph(acc, builder, capabilities, width, origin, x, y, symbol, columns, style, terminalWidth)
+                emitGlyph(acc, builder, capabilities, right, x, y, symbol, columns, style, terminalWidth)
               }
           }
         }
-      loop(updates, i + 1, next, builder, capabilities, width, height, origin)
+      loop(updates, i + 1, next, builder, capabilities, viewport)
     }
 
   private def emitGlyph(
     acc: Acc,
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
-    width: Int,
-    origin: Int,
+    right: Long,
     x: Int,
     y: Int,
     symbol: GlyphSymbol,
@@ -205,24 +362,24 @@ object AnsiWriter {
     style: CellStyle,
     terminalWidth: Int,
   ): Acc = {
-    val cursor  = ensureCursor(acc.cursor, builder, origin, x, y)
+    val cursor  = ensureCursor(acc.cursor, builder, x, y)
     val tracked = ensureStyle(acc.style, builder, capabilities, style)
     builder.append(symbol.value): Unit
     appendSpaces(builder, columns - terminalWidth)
-    val nx      = x + columns
+    val nx      = x.toLong + columns.toLong
     val after   =
-      if (nx >= width) CursorState.PendingWrap(NonNegInts.clamp(y.toLong))
-      else CursorState.Known(Position(NonNegInts.clamp(nx.toLong), NonNegInts.clamp(y.toLong)))
+      if (nx >= right) CursorState.PendingWrap(NonNegInts.clamp(y.toLong))
+      else CursorState.Known(Position(NonNegInts.clamp(nx), NonNegInts.clamp(y.toLong)))
     val wide    = if (columns === 2) Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)).some else none[Position]
     val _       = cursor
     Acc(after, tracked, wide)
   }
 
-  private def ensureCursor(cursor: CursorState, builder: java.lang.StringBuilder, origin: Int, x: Int, y: Int): CursorState =
+  private def ensureCursor(cursor: CursorState, builder: java.lang.StringBuilder, x: Int, y: Int): CursorState =
     cursor match {
       case CursorState.Known(current) if current.x.value === x && current.y.value === y => cursor
       case CursorState.Known(_) | CursorState.PendingWrap(_) | CursorState.Unknown =>
-        builder.append(Sequences.cup(origin + y + 1, x + 1)): Unit
+        builder.append(Sequences.cup(y + 1, x + 1)): Unit
         CursorState.Known(Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)))
     }
 
@@ -254,6 +411,15 @@ object AnsiWriter {
   def symbolBytes(updates: Vector[CellUpdate]): Long =
     updates.foldLeft(0L) { (acc, update) =>
       update.cell match {
+        case Cell.Glyph(symbol, _, _) => acc + utf8Length(symbol.value)
+        case Cell.Continuation(_) => acc
+      }
+    }
+
+  /** The UTF-8 length of the glyph symbols in the buffer, the `symbolBytes` term of the print budget. */
+  def bufferSymbolBytes(rows: Buffer): Long =
+    rows.cells.foldLeft(0L) { (acc, cell) =>
+      cell match {
         case Cell.Glyph(symbol, _, _) => acc + utf8Length(symbol.value)
         case Cell.Continuation(_) => acc
       }

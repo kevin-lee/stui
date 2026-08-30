@@ -7,6 +7,7 @@ import refined4s.types.numeric.NonNegInt
 import stui.core.event.{Event, KeyCode, KeyEvent}
 import stui.core.geometry.Size
 import stui.core.spi.Clock
+import stui.terminal.decoder.DecoderState
 import stui.testkit.Assertions
 import stui.unicode.internal.IntOps.*
 
@@ -36,7 +37,7 @@ object DecodingEventSourceSpec extends Properties {
   private def key(code: KeyCode): Event = Event.key(KeyEvent.press(code))
 
   private def source(input: QueueInput, resized: AtomicBoolean, size: AtomicReference[Option[Size]], escTimeout: FiniteDuration) =
-    new DecodingEventSource(input, resized, () => size.get(), escTimeout, Clock.system)
+    new DecodingEventSource(input, resized, () => size.get(), identity, escTimeout, Clock.system, DecoderState.initial, Vector.empty[Event])
 
   override def tests: List[Test] = List(
     example("a key arrives", testKey),
@@ -46,7 +47,48 @@ object DecodingEventSourceSpec extends Properties {
     example("the resize flag gives one Resize event", testResize),
     example("an empty source times out with None", testTimeout),
     example("subscribe delivers on the dispatcher thread and cancel stops it", testSubscribe),
+    example("the probe's carried events are delivered first", testInitialEvents),
+    example("the resize dedup is on the terminal size while the payload is the effective size", testEffectiveResize),
   )
+
+  def testInitialEvents: Result = {
+    val input   = new QueueInput
+    val carried = Vector(key(KeyCode.char('q')), key(KeyCode.char('w')))
+    val s       = new DecodingEventSource(
+      input,
+      new AtomicBoolean(false),
+      () => sized(80, 24).some,
+      identity,
+      50.millis,
+      Clock.system,
+      DecoderState.initial,
+      carried,
+    )
+    input.push("z")
+    val got     = List(s.poll(500.millis), s.poll(500.millis), s.poll(500.millis))
+    Assertions.eqv(got, (carried :+ key(KeyCode.char('z'))).toList.map(_.some))
+  }
+
+  def testEffectiveResize: Result = {
+    val input   = new QueueInput
+    val resized = new AtomicBoolean(false)
+    val size    = new AtomicReference(sized(10, 8).some)
+    val clamp   = (terminal: Size) => Size(terminal.width, NonNegInt(3))
+    val s       =
+      new DecodingEventSource(input, resized, () => size.get(), clamp, 50.millis, Clock.system, DecoderState.initial, Vector.empty[Event])
+    size.set(sized(10, 6).some)
+    resized.set(true)
+    val first   = s.poll(200.millis)
+    size.set(sized(10, 5).some)
+    resized.set(true)
+    val second  = s.poll(200.millis)
+    Result.all(
+      List(
+        Assertions.eqv(first, Event.resize(sized(10, 3)).some),
+        Assertions.eqv(second, Event.resize(sized(10, 3)).some),
+      )
+    )
+  }
 
   def testKey: Result = {
     val input = new QueueInput
