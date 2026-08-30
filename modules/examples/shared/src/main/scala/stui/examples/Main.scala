@@ -5,7 +5,7 @@ import refined4s.types.numeric.PosInt
 import stui.core.spi.{ScreenMode, TerminalFeature, TerminalOptions}
 import stui.terminal.PlatformTerminal
 
-/** Runs the demo on the alternate screen, or with the argument `inline` as an eight-row inline UI on the normal screen (design doc
+/** Runs the demo on the alternate screen, or with the argument `inline` as a twelve-row inline UI on the normal screen (design doc
   * 7.2), with mouse capture, bracketed paste, and focus events (JVM and Native). `p` and `P` print above the inline UI, and under the
   * alternate screen the prints flush as a transcript at exit.
   *
@@ -16,7 +16,7 @@ object Main {
 
   def main(args: Array[String]): Unit = {
     val inline     = args.headOption.exists(_.trim.equalsIgnoreCase("inline"))
-    val screenMode = if (inline) ScreenMode.inlineOf(PosInt(8)) else ScreenMode.AlternateScreen
+    val screenMode = if (inline) ScreenMode.inlineOf(PosInt(12)) else ScreenMode.AlternateScreen
     val options    = TerminalOptions.of(
       screenMode,
       TerminalFeature.MouseCapture,

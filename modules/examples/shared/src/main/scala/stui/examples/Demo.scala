@@ -3,41 +3,88 @@ package stui.examples
 import cats.syntax.all.*
 import refined4s.types.numeric.{NonNegInt, PosInt}
 import stui.core.buffer.Canvas
-import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifier, MouseEvent, MouseEventKind}
-import stui.core.frame.RegionId
+import stui.core.capability.{Capabilities, GlyphSet}
+import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifier, MouseButton, MouseEvent, MouseEventKind}
+import stui.core.frame.{RegionId, Regions}
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
-import stui.core.layout.{Constraint, Layout}
+import stui.core.layout.{Constraint, Layout, Percent}
 import stui.core.spi.ScreenMode
 import stui.core.style.{Color, Style, UnderlineStyle}
 import stui.core.terminal.{CompletedFrame, RedrawReason, RenderStats}
 import stui.core.text.{Line, Span, Text}
 import stui.terminal.TerminalSession
 import stui.terminal.TerminalSession.*
-import stui.widgets.{Block, BorderSet, LogRing, LogView, LogViewState, Paragraph, Scroll, ScrollView, Scrolling, Wrap}
+import stui.widgets.{
+  Block,
+  BorderSet,
+  Gauge,
+  ItemRegions,
+  ListView,
+  LogRing,
+  LogView,
+  LogViewState,
+  Paragraph,
+  Row,
+  Scroll,
+  ScrollView,
+  Scrollbar,
+  Scrolling,
+  Selection,
+  Table,
+  TableState,
+  Tabs,
+  Wrap,
+}
+import stui.widgets.Gauge.*
+import stui.widgets.ListView.*
 import stui.widgets.LogRing.*
 import stui.widgets.LogView.*
+import stui.widgets.Row.*
+import stui.widgets.Scrollbar.*
 import stui.widgets.ScrollView.*
+import stui.widgets.Table.*
+import stui.widgets.Tabs.*
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.tailrec
 import scala.concurrent.duration.*
 
-/** The stui demo (M2a): a titled header, a scrollable body of long wrapped Korean, Japanese, and emoji text (a [[ScrollView]] whose
-  * content size is computed per frame, the immediate-mode sizing pattern), an event log pane (a [[LogView]] following its tail,
-  * alternate screen only), and a status footer. Borders come from the capabilities ([[BorderSet.forCapabilities]]). The wheel
-  * scrolls the pane under the mouse (hit-region routing), Tab moves the key focus, Up / Down / PageUp / PageDown / Home / End
-  * scroll the focused pane, `q` or Control-C quits, `r` forces a redraw, `p` and `P` print above the UI, and a paste is shown.
+/** The stui demo (M2b): a titled header, a [[Tabs]] strip selecting one of four pages - the scrollable body of long wrapped Korean,
+  * Japanese, and emoji text with a [[Scrollbar]] beside it (M2a), a [[ListView]] with a scrollbar, a [[Table]] of Unicode samples,
+  * and three [[Gauge]]s - an event log pane (a [[LogView]] following its tail, alternate screen only), and a status footer. Every
+  * glyph comes from the capabilities ([[BorderSet.forCapabilities]], [[Tabs.dividerFor]], the scrollbar and gauge sets, the highlight
+  * symbol). Digits `1` to `4` and a click on a title select the page, `Left` / `Right` move the table's column (the page elsewhere),
+  * Tab moves the key focus between the page and the log, Up / Down / PageUp / PageDown / Home / End drive the focused pane (the
+  * scroll offset, the list or row selection, or the gauge), `+` / `-` adjust the gauge, a click selects a list item or a table row,
+  * the wheel scrolls the pane under the mouse (hit-region routing through [[ItemRegions]]), `q` or Control-C quits, `r` forces a
+  * redraw, `p` and `P` print above the UI, and a paste is shown.
   *
   * @author Kevin Lee
   * @since 2026-08-29
   */
 object Demo {
 
-  /** Which pane the scroll keys drive. */
+  /** Which pane the scroll keys drive: the page or the log. */
   enum Pane {
     case Body
     case Log
+  }
+
+  /** The four pages of the tab strip. */
+  enum Page {
+    case ScrollPage
+    case ListPage
+    case TablePage
+    case GaugePage
+  }
+
+  object Page {
+
+    /** The page the tab selection names (the first when nothing or something beyond the strip is selected). */
+    def of(selection: Selection): Page =
+      Vector(ScrollPage, ListPage, TablePage, GaugePage).lift(selection.selected.fold(0)(_.value)).getOrElse(ScrollPage)
+
   }
 
   /** What the loop remembers between frames. */
@@ -53,11 +100,17 @@ object Demo {
     log: LogRing,
     logState: LogViewState,
     pane: Pane,
+    page: Selection,
+    list: Selection,
+    table: TableState,
+    gauge: NonNegInt,
   )
 
   object State {
 
-    /** Nothing seen yet: no offset, an empty 200-line event log following its tail, the body focused. */
+    /** Nothing seen yet: no offset, an empty 200-line event log following its tail, the page focused, the first page, the first
+      * list item and table row selected, the gauge at half.
+      */
     val initial: State =
       State(
         none[Event],
@@ -71,12 +124,28 @@ object Demo {
         LogRing.empty(PosInt(200)),
         LogViewState.following,
         Pane.Body,
+        Selection.first,
+        Selection.first,
+        TableState.of(Selection.first),
+        NonNegInt(10),
       )
 
   }
 
-  /** The body pane's hit region. */
+  /** The corrected states one frame hands back (the returned-state pattern captured out of the render closure). */
+  final private case class Corrections(scroll: Scroll, logState: LogViewState, page: Selection, list: Selection, table: TableState)
+
+  /** The tab strip's hit region. */
+  val tabsRegion: RegionId = RegionId("tabs")
+
+  /** The scroll page's hit region. */
   val bodyRegion: RegionId = RegionId("body")
+
+  /** The list page's hit region. */
+  val listRegion: RegionId = RegionId("list")
+
+  /** The table page's hit region. */
+  val tableRegion: RegionId = RegionId("table")
 
   /** The log pane's hit region. */
   val logRegion: RegionId = RegionId("log")
@@ -84,8 +153,13 @@ object Demo {
   /** The status pane's hit region. */
   val statusRegion: RegionId = RegionId("status")
 
-  /** Rows the wheel scrolls per event (the app's documented choice, design doc 6.6). */
+  /** Rows or items the wheel scrolls per event (the app's documented choice, design doc 6.6). */
   private val WheelStep: Int = 3
+
+  /** The gauge counts twentieths. */
+  private val GaugeTotal: PosInt = PosInt(20)
+
+  private val PageTitles: Vector[String] = Vector("Scroll", "List", "Table", "Gauge")
 
   private def cps(codePoints: Int*): String =
     codePoints.foldLeft(new java.lang.StringBuilder)((builder, cp) => builder.appendCodePoint(cp)).toString
@@ -131,7 +205,7 @@ object Demo {
     ),
     Line.raw(""),
     Line.raw(
-      "Keys: q quits, r redraws, Tab switches the pane, Up/Down/PageUp/PageDown/Home/End scroll it, the wheel scrolls the hovered pane, p and P print above the UI, paste something."
+      "Keys: q quits, r redraws, 1-4 pick a page, Tab switches the pane, Up/Down/PageUp/PageDown/Home/End drive it, the wheel scrolls the hovered pane, a click selects, p and P print above the UI, paste something."
     ),
   )
 
@@ -141,20 +215,54 @@ object Demo {
       bodyText.lines ++ Vector.tabulate(40)(i => Line.raw(f"L${i + 1}%04d the quick brown fox jumps over the lazy dog 한글 넓은 글자"))
     )
 
+  private val listSamples: Vector[String] =
+    Vector("한국어 항목", "日本語の項目", "emoji 🎉 item", "plain ascii item", "넓은 글자 wide item")
+
+  /** Thirty numbered items cycling through the samples. */
+  private val listItems: Vector[String] =
+    Vector.tabulate(30)(i => f"item ${i + 1}%02d - ${listSamples.lift(i % listSamples.length).getOrElse("")}")
+
+  /** The number of list items. */
+  private val ListCount: NonNegInt = NonNegInt(30)
+
+  private val tableRows: Vector[Row] = Vector(
+    Row.raw("한", "U+D55C", "2", "Hangul syllable"),
+    Row.raw("글", "U+AE00", "2", "Hangul syllable"),
+    Row.raw("あ", "U+3042", "2", "Hiragana"),
+    Row.raw("👋", "U+1F44B", "2", "emoji"),
+    Row.raw("🇰🇷", "U+1F1F0 U+1F1F7", "2", "flag, two regional indicators"),
+    Row.raw(keyboardVs16, "U+2328 U+FE0F", "2", "VS16 sequence"),
+    Row.raw("a", "U+0061", "1", "ASCII"),
+    Row.raw("é", "U+00E9", "1", "Latin-1"),
+    Row.raw("ﾃ", "U+FF83", "1", "halfwidth katakana"),
+    Row.raw("ㅏ", "U+314F", "2", "Hangul compatibility jamo"),
+    Row.raw("☆", "U+2606", "1", "East Asian Ambiguous"),
+    Row.raw("─", "U+2500", "1", "box drawing, Ambiguous"),
+  )
+
   /** The pane rects of one frame. The layout laws guarantee one rect per constraint, so the fallback rows are unreachable. */
-  final private case class PaneAreas(header: Rect, body: Rect, log: Option[Rect], footer: Rect)
+  final private case class PaneAreas(header: Rect, tabs: Rect, page: Rect, log: Option[Rect], footer: Rect)
 
   private def paneAreas(area: Rect, inline: Boolean): PaneAreas =
     if (inline) {
-      Layout.vertical(Constraint.length(3), Constraint.fill(1), Constraint.length(3)).split(area) match {
-        case Vector(header, body, footer) => PaneAreas(header, body, none[Rect], footer)
-        case _ => PaneAreas(area, area, none[Rect], area)
+      Layout.vertical(Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(3)).split(area) match {
+        case Vector(header, tabs, page, footer) => PaneAreas(header, tabs, page, none[Rect], footer)
+        case _ => PaneAreas(area, area, area, none[Rect], area)
       }
     } else {
-      Layout.vertical(Constraint.length(3), Constraint.fill(1), Constraint.length(8), Constraint.length(3)).split(area) match {
-        case Vector(header, body, log, footer) => PaneAreas(header, body, log.some, footer)
-        case _ => PaneAreas(area, area, none[Rect], area)
+      Layout
+        .vertical(Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(6), Constraint.length(3))
+        .split(area) match {
+        case Vector(header, tabs, page, log, footer) => PaneAreas(header, tabs, page, log.some, footer)
+        case _ => PaneAreas(area, area, area, none[Rect], area)
       }
+    }
+
+  /** A page area split into the widget's area and the one-column scrollbar lane beside it. */
+  private def withLane(area: Rect): (Rect, Rect) =
+    Layout.horizontal(Constraint.fill(1), Constraint.length(1)).split(area) match {
+      case Vector(body, lane) => (body, lane)
+      case _ => (area, area)
     }
 
   private def isInline(session: TerminalSession): Boolean = session.terminal.options.screenMode match {
@@ -164,19 +272,26 @@ object Demo {
 
   private def borders(session: TerminalSession): BorderSet = BorderSet.forCapabilities(session.capabilities)
 
-  private def bodyBlock(borders: BorderSet): Block =
-    Block
-      .bordered
-      .withBorderSet(borders)
-      .withTitle(Line.raw(" 안녕하세요 · こんにちは · hello 👋 "))
-      .withBorderStyle(Style.empty.withFg(Color.Magenta))
+  /** The highlight symbol: the right-pointing triangle (U+25B6, East Asian Ambiguous) under Unicode glyphs, `>` otherwise. */
+  private def symbol(capabilities: Capabilities): Line = capabilities.effectiveGlyphs match {
+    case GlyphSet.Unicode => Line.raw("▶ ")
+    case GlyphSet.Ascii => Line.raw("> ")
+  }
 
-  private def logBlock(borders: BorderSet): Block =
-    Block.bordered.withBorderSet(borders).withTitle(Line.raw(" events ")).withBorderStyle(Style.empty.withFg(Color.Yellow))
+  private def titled(set: BorderSet, title: String, color: Color): Block =
+    Block.bordered.withBorderSet(set).withTitle(Line.raw(title)).withBorderStyle(Style.empty.withFg(color))
 
-  /** The body pane's inner rows at the current viewport (what PageUp / PageDown step by). */
-  private def bodyRows(session: TerminalSession): NonNegInt =
-    bodyBlock(borders(session)).inner(paneAreas(session.terminal.viewport, isInline(session)).body).height
+  private def bodyBlock(set: BorderSet): Block = titled(set, " 안녕하세요 · こんにちは · hello 👋 ", Color.Magenta)
+
+  private def listBlock(set: BorderSet): Block = titled(set, " list ", Color.Blue)
+
+  private def tableBlock(set: BorderSet): Block = titled(set, " table ", Color.Cyan)
+
+  private def logBlock(set: BorderSet): Block = titled(set, " events ", Color.Yellow)
+
+  /** The focused page's inner rows at the current viewport (what PageUp / PageDown step by), at least 1. */
+  private def pageRows(session: TerminalSession): Int =
+    math.max(1, paneAreas(session.terminal.viewport, isInline(session)).page.height.value - 2)
 
   /** The log pane's inner rows at the current viewport. */
   private def logRows(session: TerminalSession): NonNegInt =
@@ -184,21 +299,28 @@ object Demo {
       .log
       .fold(NonNegInt(0))(area => logBlock(borders(session)).inner(area).height)
 
-  /** Renders one frame; the corrected scroll states land in `corrections` (the returned-state pattern captured out of the render
-    * closure, the `Rendering.statefulWith` shape).
+  /** Renders one frame; the corrected states land in `corrections` (the returned-state pattern captured out of the render closure,
+    * the `Rendering.statefulWith` shape).
     */
-  def view(state: State, session: TerminalSession, corrections: AtomicReference[(Scroll, LogViewState)])(canvas: Canvas): Unit = {
+  private def view(state: State, session: TerminalSession, corrections: AtomicReference[Corrections])(canvas: Canvas): Unit = {
     val set   = borders(session)
+    val caps  = session.capabilities
     val panes = paneAreas(canvas.area, isInline(session))
     renderHeader(session, set, panes.header, canvas)
-    renderBody(state, set, panes.body, canvas, corrections)
+    renderTabs(state, caps, panes.tabs, canvas, corrections)
+    Page.of(state.page) match {
+      case Page.ScrollPage => renderScrollPage(state, set, caps, panes.page, canvas, corrections)
+      case Page.ListPage => renderListPage(state, set, caps, panes.page, canvas, corrections)
+      case Page.TablePage => renderTablePage(state, set, caps, panes.page, canvas, corrections)
+      case Page.GaugePage => renderGaugePage(state, set, caps, panes.page, canvas)
+    }
     panes.log.foreach(area => renderLog(state, set, area, canvas, corrections))
     renderFooter(state, session, set, panes.footer, canvas)
   }
 
   private def renderHeader(session: TerminalSession, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
     val block =
-      Block.bordered.withBorderSet(set).withTitle(Line.raw(" stui M2a demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
+      Block.bordered.withBorderSet(set).withTitle(Line.raw(" stui M2b demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
     block.render(area, canvas)
     val caps  = session.capabilities
     val line  = Line.of(
@@ -220,38 +342,122 @@ object Demo {
     line.render(block.inner(area), canvas)
   }
 
-  private def renderBody(
+  private def renderTabs(state: State, caps: Capabilities, area: Rect, canvas: Canvas, corrections: AtomicReference[Corrections]): Unit = {
+    val corrected = Tabs
+      .fromLines(PageTitles.map(Line.raw))
+      .withDividerFor(caps)
+      .withHighlightStyle(Style.empty.reversed.bold)
+      .withRegion(tabsRegion)
+      .render(area, canvas, state.page)
+    corrections.updateAndGet(_.copy(page = corrected)): Unit
+  }
+
+  private def renderScrollPage(
     state: State,
     set: BorderSet,
+    caps: Capabilities,
     area: Rect,
     canvas: Canvas,
-    corrections: AtomicReference[(Scroll, LogViewState)],
+    corrections: AtomicReference[Corrections],
   ): Unit = {
-    val block       = bodyBlock(set)
-    val inner       = block.inner(area)
-    val paragraph   = Paragraph.of(longBodyText).withWrap(Wrap.Word)
-    val contentSize = Size(inner.width, NonNegInts.clamp(paragraph.lineCount(inner.width, canvas.policy).toLong))
-    val corrected   = ScrollView
+    val (body, lane) = withLane(area)
+    val block        = bodyBlock(set)
+    val inner        = block.inner(body)
+    val paragraph    = Paragraph.of(longBodyText).withWrap(Wrap.Word)
+    val contentSize  = Size(inner.width, NonNegInts.clamp(paragraph.lineCount(inner.width, canvas.policy).toLong))
+    val corrected    = ScrollView
       .of(paragraph, contentSize)
       .withBlock(block)
       .withRegion(bodyRegion)
-      .render(area, canvas, state.scroll)
-    corrections.updateAndGet { case (_, logState) => (corrected, logState) }: Unit
+      .render(body, canvas, state.scroll)
+    Scrollbar.ofScroll(corrected, contentSize, inner.size).withSetFor(caps).render(lane, canvas)
+    corrections.updateAndGet(_.copy(scroll = corrected)): Unit
   }
+
+  private def renderListPage(
+    state: State,
+    set: BorderSet,
+    caps: Capabilities,
+    area: Rect,
+    canvas: Canvas,
+    corrections: AtomicReference[Corrections],
+  ): Unit = {
+    val (body, lane) = withLane(area)
+    val block        = listBlock(set)
+    val corrected    = ListView
+      .raw(listItems*)
+      .withBlock(block)
+      .withHighlightSymbol(symbol(caps))
+      .withHighlightStyle(Style.empty.reversed)
+      .withScrollPadding(NonNegInt(1))
+      .withRegion(listRegion)
+      .render(body, canvas, state.list)
+    Scrollbar.ofSelection(corrected, ListCount, block.inner(body).height).withSetFor(caps).render(lane, canvas)
+    corrections.updateAndGet(_.copy(list = corrected)): Unit
+  }
+
+  private def renderTablePage(
+    state: State,
+    set: BorderSet,
+    caps: Capabilities,
+    area: Rect,
+    canvas: Canvas,
+    corrections: AtomicReference[Corrections],
+  ): Unit = {
+    val corrected = Table
+      .of(tableRows)
+      .withWidths(Vector(Constraint.length(6), Constraint.length(16), Constraint.length(5), Constraint.fill(1)))
+      .withHeader(Row.raw("glyph", "code points", "width", "note").withStyle(Style.empty.bold))
+      .withBlock(tableBlock(set))
+      .withHighlightSymbol(symbol(caps))
+      .withRowHighlightStyle(Style.empty.reversed)
+      .withColumnHighlightStyle(Style.empty.bold.underlined)
+      .withCellHighlightStyle(Style.empty.withFg(Color.Yellow))
+      .withScrollPadding(NonNegInt(1))
+      .withRegion(tableRegion)
+      .render(area, canvas, state.table)
+    corrections.updateAndGet(_.copy(table = corrected)): Unit
+  }
+
+  private def renderGaugePage(state: State, set: BorderSet, caps: Capabilities, area: Rect, canvas: Canvas): Unit =
+    Layout.vertical(Constraint.length(3), Constraint.length(3), Constraint.length(3), Constraint.fill(1)).split(area) match {
+      case Vector(first, second, third, _) =>
+        val listIndex = NonNegInts.clamp(math.min(state.list.selected.fold(0L)(_.value.toLong), ListCount.value.toLong - 1L))
+        Gauge
+          .fraction(state.gauge, GaugeTotal)
+          .withBlock(titled(set, " progress (+ / -) ", Color.Green))
+          .withGaugeStyle(Style.empty.withFg(Color.Green))
+          .withSetFor(caps)
+          .render(first, canvas)
+        Gauge
+          .fraction(listIndex, PosInt(29))
+          .withBlock(titled(set, " list position ", Color.Cyan))
+          .withGaugeStyle(Style.empty.withFg(Color.Cyan))
+          .withSetFor(caps)
+          .render(second, canvas)
+        Gauge
+          .percent(Percent(100))
+          .withLabel(Line.raw("done"))
+          .withBlock(titled(set, " done ", Color.Magenta))
+          .withGaugeStyle(Style.empty.withFg(Color.Magenta))
+          .withSetFor(caps)
+          .render(third, canvas)
+      case _ => ()
+    }
 
   private def renderLog(
     state: State,
     set: BorderSet,
     area: Rect,
     canvas: Canvas,
-    corrections: AtomicReference[(Scroll, LogViewState)],
+    corrections: AtomicReference[Corrections],
   ): Unit = {
     val corrected = LogView
       .of(state.log)
       .withBlock(logBlock(set))
       .withRegion(logRegion)
       .render(area, canvas, state.logState)
-    corrections.updateAndGet { case (scroll, _) => (scroll, corrected) }: Unit
+    corrections.updateAndGet(_.copy(logState = corrected)): Unit
   }
 
   private def renderFooter(state: State, session: TerminalSession, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
@@ -262,11 +468,20 @@ object Demo {
     val stats =
       state.stats.fold("-")(s => s"${s.bytes.value.toString} B, ${s.cells.value.toString} cells, ${s.duration.toMicros.toString} us")
     val log   = s"${state.logState.anchor.value.toString}${if (state.logState.following) " f" else ""}"
+    val row   = s"${state.table.rows.selected.fold("-")(_.value.toString)} col ${state.table.column.fold("-")(_.value.toString)}"
     val line  = Line.of(
       Span.styled("pane ", Style.empty.dim),
       Span.raw(paneName(state.pane)),
+      Span.styled("  page ", Style.empty.dim),
+      Span.raw(state.page.selected.fold("-")(_.value.toString)),
       Span.styled("  scroll ", Style.empty.dim),
       Span.raw(s"${state.scroll.rows.value.toString},${state.scroll.columns.value.toString}"),
+      Span.styled("  list ", Style.empty.dim),
+      Span.raw(state.list.selected.fold("-")(_.value.toString)),
+      Span.styled("  row ", Style.empty.dim),
+      Span.raw(row),
+      Span.styled("  gauge ", Style.empty.dim),
+      Span.raw(s"${Gauge.percentOf(Gauge.fraction(state.gauge, GaugeTotal)).toString}%"),
       Span.styled("  log ", Style.empty.dim),
       Span.raw(log),
       Span.styled("  size ", Style.empty.dim),
@@ -306,63 +521,113 @@ object Demo {
   private def eventLine(frame: Int, event: Event): Line =
     Line.of(Span.styled(s"#${frame.toString} ", Style.empty.dim), Span.raw(event.show))
 
+  private def isBody(pane: Pane): Boolean = pane match {
+    case Pane.Body => true
+    case Pane.Log => false
+  }
+
   private def togglePane(pane: Pane): Pane = pane match {
     case Pane.Body => Pane.Log
     case Pane.Log => Pane.Body
   }
 
-  /** The focused pane scrolled by `delta` rows (negative is up); the render clamps. */
-  private def scrollFocused(session: TerminalSession, state: State, delta: Int): State = state.pane match {
-    case Pane.Body => state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
-    case Pane.Log =>
-      val rows = NonNegInts.clamp(math.abs(delta).toLong)
-      val next =
-        if (delta < 0) LogView.scrolledUp(state.logState, state.log, logRows(session), rows)
-        else LogView.scrolledDown(state.logState, state.log, logRows(session), rows)
-      state.copy(logState = next)
+  /** The gauge moved by `delta` twentieths, clamped into 0..20. */
+  private def gaugeBy(state: State, delta: Int): State =
+    state.copy(gauge = NonNegInts.clamp(math.min(GaugeTotal.value.toLong, state.gauge.value.toLong + delta.toLong)))
+
+  /** The log scrolled by `delta` rows (negative is up) through the pure helpers. */
+  private def logBy(session: TerminalSession, state: State, delta: Int): State = {
+    val rows = NonNegInts.clamp(math.abs(delta).toLong)
+    val next =
+      if (delta < 0) LogView.scrolledUp(state.logState, state.log, logRows(session), rows)
+      else LogView.scrolledDown(state.logState, state.log, logRows(session), rows)
+    state.copy(logState = next)
   }
 
-  private def pageStep(session: TerminalSession, state: State): Int = {
-    val rows = state.pane match {
-      case Pane.Body => bodyRows(session)
-      case Pane.Log => logRows(session)
-    }
-    math.max(1, rows.value)
+  /** The focused pane moved by `delta` (negative is up): the log, the scroll offset, the list or row selection, or the gauge; the
+    * render clamps.
+    */
+  private def moveFocused(session: TerminalSession, state: State, delta: Int): State = state.pane match {
+    case Pane.Log => logBy(session, state, delta)
+    case Pane.Body =>
+      Page.of(state.page) match {
+        case Page.ScrollPage => state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
+        case Page.ListPage => state.copy(list = state.list.movedBy(delta))
+        case Page.TablePage => state.copy(table = state.table.rowsMovedBy(delta))
+        case Page.GaugePage => gaugeBy(state, delta)
+      }
+  }
+
+  private def pageStep(session: TerminalSession, state: State): Int = state.pane match {
+    case Pane.Body => pageRows(session)
+    case Pane.Log => math.max(1, logRows(session).value)
   }
 
   private def toTopFocused(state: State): State = state.pane match {
-    case Pane.Body => state.copy(scroll = Scroll.none)
     case Pane.Log => state.copy(logState = LogView.toTop(state.log))
+    case Pane.Body =>
+      Page.of(state.page) match {
+        case Page.ScrollPage => state.copy(scroll = Scroll.none)
+        case Page.ListPage => state.copy(list = state.list.selectFirst)
+        case Page.TablePage => state.copy(table = state.table.selectFirstRow)
+        case Page.GaugePage => state.copy(gauge = NonNegInt(0))
+      }
   }
 
   private def toBottomFocused(state: State): State = state.pane match {
-    case Pane.Body => state.copy(scroll = Scrolling.scrolledBy(state.scroll, 1000000, 0))
     case Pane.Log => state.copy(logState = LogView.toBottom)
+    case Pane.Body =>
+      Page.of(state.page) match {
+        case Page.ScrollPage => state.copy(scroll = Scrolling.scrolledBy(state.scroll, 1000000, 0))
+        case Page.ListPage => state.copy(list = state.list.selectLast)
+        case Page.TablePage => state.copy(table = state.table.selectLastRow)
+        case Page.GaugePage => state.copy(gauge = NonNegInts.clamp(GaugeTotal.value.toLong))
+      }
   }
+
+  /** Left and Right move the table's column on the table page and the page selection elsewhere. */
+  private def sideways(state: State, delta: Int): State =
+    Page.of(state.page) match {
+      case Page.TablePage if isBody(state.pane) =>
+        state.copy(table = if (delta < 0) state.table.selectPreviousColumn else state.table.selectNextColumn)
+      case Page.ScrollPage | Page.ListPage | Page.TablePage | Page.GaugePage =>
+        state.copy(page = if (delta < 0) state.page.selectPrevious else state.page.selectNext)
+    }
+
+  /** A click selects the tab, the list item, or the table row under the mouse (design doc 6.6, [[ItemRegions]]). */
+  private def click(state: State, over: Option[RegionId]): State =
+    over.fold(state) { id =>
+      ItemRegions
+        .indexOf(tabsRegion, id)
+        .map(i => state.copy(page = state.page.select(i.some)))
+        .orElse(ItemRegions.indexOf(listRegion, id).map(i => state.copy(list = state.list.select(i.some))))
+        .orElse(ItemRegions.indexOf(tableRegion, id).map(i => state.copy(table = state.table.selectRow(i.some))))
+        .getOrElse(state)
+    }
 
   /** The wheel scrolls the pane under the mouse, resolved through the frame's hit regions (design doc 6.6). */
   private def wheel(session: TerminalSession, state: State, over: Option[RegionId], delta: Int): State =
-    if (over.exists(_ === bodyRegion)) {
-      state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
-    } else if (over.exists(_ === logRegion)) {
-      val rows = NonNegInts.clamp(math.abs(delta).toLong)
-      val next =
-        if (delta < 0) LogView.scrolledUp(state.logState, state.log, logRows(session), rows)
-        else LogView.scrolledDown(state.logState, state.log, logRows(session), rows)
-      state.copy(logState = next)
-    } else {
-      state
+    over.fold(state) { id =>
+      if (id === bodyRegion) state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
+      else if (ItemRegions.owns(listRegion, id)) state.copy(list = state.list.movedBy(delta))
+      else if (ItemRegions.owns(tableRegion, id)) state.copy(table = state.table.rowsMovedBy(delta))
+      else if (id === logRegion) logBy(session, state, delta)
+      else state
     }
 
   private def mouseStep(session: TerminalSession, state: State, mouse: MouseEvent, completed: CompletedFrame): State = {
-    val over = completed.frame.regions.at(mouse.position)
-    val next = mouse.kind match {
+    val regions: Regions = completed.frame.regions
+    val over             = regions.at(mouse.position)
+    val next             = mouse.kind match {
+      case MouseEventKind.Down(MouseButton.Left) => click(state, over)
       case MouseEventKind.ScrollUp => wheel(session, state, over, -WheelStep)
       case MouseEventKind.ScrollDown => wheel(session, state, over, WheelStep)
       case _ => state
     }
     next.copy(hovered = over)
   }
+
+  private def isDigitPage(c: Char): Boolean = c >= '1' && c <= '4'
 
   /** One event folded into the state (the event was already logged and remembered by the loop). */
   private def step(session: TerminalSession, state: State, event: Event, completed: CompletedFrame): State = event match {
@@ -391,12 +656,18 @@ object Demo {
           )
         )
       state.copy(printed = state.printed + 1)
+    case Event.Key(KeyEvent(KeyCode.Char('+'), _, _)) => gaugeBy(state, 1)
+    case Event.Key(KeyEvent(KeyCode.Char('-'), _, _)) => gaugeBy(state, -1)
+    case Event.Key(KeyEvent(KeyCode.Char(c), _, _)) if isDigitPage(c) =>
+      state.copy(page = state.page.select(NonNegInts.clamp((c - '1').toLong).some))
     case Event.Key(KeyEvent(KeyCode.Tab, _, _)) =>
       if (isInline(session)) state else state.copy(pane = togglePane(state.pane))
-    case Event.Key(KeyEvent(KeyCode.Up, _, _)) => scrollFocused(session, state, -1)
-    case Event.Key(KeyEvent(KeyCode.Down, _, _)) => scrollFocused(session, state, 1)
-    case Event.Key(KeyEvent(KeyCode.PageUp, _, _)) => scrollFocused(session, state, -pageStep(session, state))
-    case Event.Key(KeyEvent(KeyCode.PageDown, _, _)) => scrollFocused(session, state, pageStep(session, state))
+    case Event.Key(KeyEvent(KeyCode.Left, _, _)) => sideways(state, -1)
+    case Event.Key(KeyEvent(KeyCode.Right, _, _)) => sideways(state, 1)
+    case Event.Key(KeyEvent(KeyCode.Up, _, _)) => moveFocused(session, state, -1)
+    case Event.Key(KeyEvent(KeyCode.Down, _, _)) => moveFocused(session, state, 1)
+    case Event.Key(KeyEvent(KeyCode.PageUp, _, _)) => moveFocused(session, state, -pageStep(session, state))
+    case Event.Key(KeyEvent(KeyCode.PageDown, _, _)) => moveFocused(session, state, pageStep(session, state))
     case Event.Key(KeyEvent(KeyCode.Home, _, _)) => toTopFocused(state)
     case Event.Key(KeyEvent(KeyCode.End, _, _)) => toBottomFocused(state)
     case Event.Resize(_) =>
@@ -412,12 +683,20 @@ object Demo {
   /** Draws, waits for an event, and loops until `q`, Control-C, or a termination signal. Returns why it stopped. */
   @tailrec
   def loop(session: TerminalSession, state: State): String = {
-    /* the corrected scroll states are captured out of the render closure through a reference (the Rendering.statefulWith shape) */
-    val corrections        = new AtomicReference((state.scroll, state.logState))
-    val completed          = session.terminal.draw(view(state, session, corrections))
-    val (scroll, logState) = corrections.get()
-    val next               =
-      state.copy(stats = completed.stats.some, frames = state.frames + 1, scroll = scroll, logState = logState)
+    /* the corrected states are captured out of the render closure through a reference (the Rendering.statefulWith shape) */
+    val corrections = new AtomicReference(Corrections(state.scroll, state.logState, state.page, state.list, state.table))
+    val completed   = session.terminal.draw(view(state, session, corrections))
+    val c           = corrections.get()
+    val next        =
+      state.copy(
+        stats = completed.stats.some,
+        frames = state.frames + 1,
+        scroll = c.scroll,
+        logState = c.logState,
+        page = c.page,
+        list = c.list,
+        table = c.table,
+      )
     session.events.poll(100.millis) match {
       case Some(Event.Key(KeyEvent(KeyCode.Char('q'), _, _))) => "quit"
       case Some(Event.Key(KeyEvent(KeyCode.Char('c'), modifiers, _))) if modifiers.contains(KeyModifier.Control) => "interrupted"
