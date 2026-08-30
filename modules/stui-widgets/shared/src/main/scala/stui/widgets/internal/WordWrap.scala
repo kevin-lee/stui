@@ -11,9 +11,13 @@ import scala.annotation.tailrec
 /** The line composers of [[stui.widgets.Paragraph]]: the greedy word wrapper and the truncator, both grapheme-aware through
   * stui-unicode.
   *
-  * The wrap machine follows Ratatui's `WordWrapper` with three documented fixes (M1d plan, R2): a produced row is never wider than the
-  * width, pending whitespace at a row break is dropped entirely, and a whitespace run wider than the row is chunked like a word when
-  * not trimming. Words are maximal runs of non-whitespace clusters, a cluster is whitespace when all its code points satisfy
+  * The wrap machine follows Ratatui's `WordWrapper` with four documented fixes (M1d plan R2, the fourth added for issue 27): a
+  * produced row is never wider than the width, pending whitespace at a row break is dropped entirely, a whitespace run wider than the
+  * row is chunked like a word when not trimming, and the span join break - two clusters that would form a single grapheme cluster are
+  * never merged into one span, because a span boundary is a cluster boundary throughout the stack (`Line.width` sums per-span widths,
+  * `Canvas` segments per span, and the writer's rule R2a keeps such cells apart on the wire). Without it a merged span re-segments into
+  * different clusters and VS16 forces the joined one to width 2, which produces a row wider than the width.
+  * Words are maximal runs of non-whitespace clusters, a cluster is whitespace when all its code points satisfy
   * `Character.isWhitespace` or it is U+200B (zero width space, a free break), U+00A0 (no-break space) is not whitespace, a word wider
   * than the row breaks at cluster boundaries, a cluster wider than the row is skipped, zero-width clusters ride along at no cost, and
   * every logical line yields at least one row (an empty or fully trimmed line yields one empty row).
@@ -24,6 +28,8 @@ import scala.annotation.tailrec
 private[widgets] object WordWrap {
 
   final private case class Token(symbol: String, width: Int, style: Style, isWhitespace: Boolean)
+
+  final private case class Merge(spans: Vector[Span], previous: String)
 
   final private case class MachineState(
     rows: Vector[Vector[Token]],
@@ -179,14 +185,22 @@ private[widgets] object WordWrap {
       if (Character.isWhitespace(cp)) allWhitespace(s, i + Character.charCount(cp)) else false
     }
 
-  /** Adjacent clusters with equal styles merge back into single spans. */
+  /** Adjacent clusters with equal styles merge back into single spans, except where the merge would form one grapheme cluster (the span
+    * join break): those clusters stay in separate spans, so every emitted span re-segments into exactly the tokens it was built from
+    * and its width is their sum.
+    */
   private def mergeSpans(tokens: Vector[Token]): Vector[Span] =
-    tokens.foldLeft(Vector.empty[Span]) { (acc, token) =>
-      acc.lastOption match {
-        case Some(last) if last.style === token.style => acc.dropRight(1) :+ Span(last.content + token.symbol, last.style)
-        case Some(_) => acc :+ Span(token.symbol, token.style)
-        case None => acc :+ Span(token.symbol, token.style)
+    tokens
+      .foldLeft(Merge(Vector.empty[Span], "")) { (merge, token) =>
+        /* `merge.previous` is the last span's last cluster: the break keeps every emitted span's clusters equal to its tokens, so by
+         * induction the previous token's symbol is that span's final cluster, the single cluster `Graphemes.joins` expects as `last`. */
+        val spans = merge.spans.lastOption match {
+          case Some(last) if last.style === token.style && !Graphemes.joins(merge.previous, token.symbol) =>
+            merge.spans.dropRight(1) :+ Span(last.content + token.symbol, last.style)
+          case Some(_) | None => merge.spans :+ Span(token.symbol, token.style)
+        }
+        Merge(spans, token.symbol)
       }
-    }
+      .spans
 
 }
