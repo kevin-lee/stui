@@ -15,17 +15,10 @@ env:
 
 jobs:
 
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+  # The format, scalafix, and UCD-generator checks run once, on one runner; the tests run per platform below.
+  lint:
+    runs-on: ubuntu-latest
 
-    runs-on: ${{ matrix.os }}
-
-    # M1a and M1b runs take 3-5 minutes, the GitHub default is 360. A hang (2026-08-22) must not burn the quota.
     timeout-minutes: 20
 
     steps:
@@ -50,12 +43,63 @@ jobs:
           scala-cli fmt --check --scalafmt-conf .scalafmt.conf scripts/unicode
           scala-cli compile scripts/unicode
 
+      - name: "Format and scalafix checks - ${{ github.run_number }}"
+        run: |
+          java -version
+          sbt -v clean scalafmtCheckAll scalafmtSbtCheck "scalafixAll --check"
+
+  # One job per platform and OS (2026-08-30). Running every platform in one job exhausted the 16 GB Linux runner during
+  # the Native test phase: sbt runs suites in parallel, the Scala Native test adapter starts one native process per parallel
+  # worker, and immix sizes each heap from the machine's physical memory (root cause reproduced under Podman). The Native
+  # job therefore runs its suites sequentially, one native process per project. An immix cap (GC_MAXIMUM_HEAP_SIZE) is
+  # deliberately not set: it segfaulted the widgets test binary intermittently on macOS arm64 with Scala Native 0.5.12.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        platform:
+          - jvm
+          - js
+          - native
+        include:
+          - platform: jvm
+            tasks: unicodeJVM/test coreJVM/test testkitJVM/test widgetsJVM/test terminalJVM/test examplesJVM/compile
+          - platform: js
+            tasks: unicodeJS/test coreJS/test testkitJS/test widgetsJS/test terminalJS/test
+          # The `set` must precede the test tasks (sbt runs its command line in order).
+          - platform: native
+            tasks: '"set every Test / parallelExecution := false" unicodeNative/test coreNative/test testkitNative/test widgetsNative/test terminalNative/test examplesNative/nativeLink'
+
+    runs-on: ${{ matrix.os }}
+
+    # A per-platform job takes 3-6 minutes, the GitHub default is 360. A hang (2026-08-22) must not burn the quota.
+    timeout-minutes: 20
+
+    # V8 otherwise takes about a quarter of the machine as its heap limit, per Node process.
+    env:
+      NODE_OPTIONS: --max-old-space-size=1024
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
       - uses: actions/setup-node@v7
+        if: matrix.platform == 'js'
         with:
           node-version: 24
 
-      - name: "Build and test all platforms on ${{ matrix.os }} - ${{ github.run_number }}"
+      - name: "Build and test ${{ matrix.platform }} on ${{ matrix.os }} - ${{ github.run_number }}"
         run: |
           java -version
-          node --version
-          sbt -v clean scalafmtCheckAll scalafmtSbtCheck "scalafixAll --check" test
+          if [ "${{ matrix.platform }}" = "js" ]; then node --version; fi
+          sbt -v clean ${{ matrix.tasks }}
