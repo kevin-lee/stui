@@ -50,6 +50,8 @@ object TerminalModelSpec extends Properties {
       Assertions.eqv(rows(TerminalModel.interpret(default, blank(3, 1), cup(1, 1) + "ab")), Right(Vector("ab "))),
     ),
     example("the cursor advances by the text", testCursorAdvance),
+    example("CHA moves within the row and clears the pending wrap", testCha),
+    example("CHA beyond the width is an error", testChaOutside),
     example("the last column sets pending wrap", testPendingWrap),
     example(
       "a printable after pending wrap on the last row scrolls",
@@ -313,5 +315,11 @@ object TerminalModelSpec extends Properties {
       )
     )
   }
+
+  def testCha: Result =
+    Assertions.eqv(rows(TerminalModel.interpret(default, blank(3, 1), "abc" + csi + "2G" + "X")), Vector("aXc").asRight[ModelError])
+
+  def testChaOutside: Result =
+    Result.assert(TerminalModel.interpret(default, blank(3, 1), csi + "4G").isLeft).log("CHA beyond the width was accepted")
 
 }

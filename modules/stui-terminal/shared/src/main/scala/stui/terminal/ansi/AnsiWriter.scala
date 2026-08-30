@@ -8,6 +8,7 @@ import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.spi.TerminalOptions
 import stui.core.style.CellStyle
+import stui.unicode.Graphemes
 import stui.unicode.internal.IntOps.*
 
 import scala.annotation.tailrec
@@ -20,6 +21,9 @@ import scala.annotation.tailrec
   *   - R1: after a write in the last column the tracked cursor is `PendingWrap`, and the next move is absolute.
   *   - R2: consecutive updates advance by the glyph's terminal width without a cursor move, a `Continuation` update whose owner was
   *     not the previous emitted wide glyph is painted as a space in the default style.
+  *   - R2a (2026-08-31): a glyph that would join the previously emitted cluster into one grapheme cluster on the wire (a lone
+  *     regional indicator after another, a standalone mark after any glyph) is preceded by an explicit cursor placement - CUP in a
+  *     present, CHA in a printed row - so the terminal keeps the cells apart ([[joins]]); the budget of R10 already covers it.
   *   - R3: a wide glyph is emitted with its continuation column accounted for, and a wide glyph whose shadow would fall outside the
   *     viewport is painted as a space in its style.
   *   - R4: a control never reaches the terminal as a glyph (impossible by the `GlyphSymbol` type).
@@ -43,8 +47,8 @@ import scala.annotation.tailrec
   */
 object AnsiWriter {
 
-  /** The byte budget per update (rule R10): a Cursor Position of at most 24 bytes for ten-digit coordinates, an SGR delta of at most
-    * 128 bytes, and the shadow or orphan space.
+  /** The byte budget per update (rule R10): a Cursor Position of at most 24 bytes for ten-digit coordinates (or the CHA of a join
+    * break, at most 15), an SGR delta of at most 128 bytes, and the shadow or orphan space.
     */
   val MaxBytesPerCell: Int = 160
 
@@ -57,14 +61,15 @@ object AnsiWriter {
   /** The byte budget per print beyond the rows (rule R10): one Cursor Position (at most 24) and Erase in Display (3). */
   val MaxBytesPerPrint: Int = 32
 
-  final private case class Acc(cursor: CursorState, style: CellStyle, lastWide: Option[Position])
+  /** `last` is the last emitted cluster of the run (`" "` after a shadow, orphan, or cut-wide space, `""` after a cursor placement). */
+  final private case class Acc(cursor: CursorState, style: CellStyle, lastWide: Option[Position], last: String)
 
   /** Emits the updates of one present over the screen-coordinate viewport and returns the state with the tracked cursor after the
     * last write and the default style.
     */
   def present(state: WriterState, capabilities: Capabilities, viewport: Rect, updates: Vector[CellUpdate]): (WriterState, String) = {
     val builder = new java.lang.StringBuilder
-    val end     = loop(IArray.from(updates), 0, Acc(state.cursor, state.style, none[Position]), builder, capabilities, viewport)
+    val end     = loop(IArray.from(updates), 0, Acc(state.cursor, state.style, none[Position], ""), builder, capabilities, viewport)
     if (end.style =!= CellStyle.default) builder.append(Sequences.SgrReset): Unit else ()
     (state.copy(cursor = end.cursor, style = CellStyle.default), builder.toString)
   }
@@ -264,7 +269,7 @@ object AnsiWriter {
   ): CellStyle = {
     val width   = math.min(rowWidth, limit)
     val count   = lastNonBlank(cells, rowStart, width)
-    val tracked = emitRowCells(cells, rowStart, 0, count, limit, style, builder, capabilities)
+    val tracked = emitRowCells(cells, rowStart, 0, count, limit, style, builder, capabilities, "")
     val reset   =
       if (tracked =!= CellStyle.default) {
         builder.append(Sequences.SgrReset): Unit
@@ -292,26 +297,44 @@ object AnsiWriter {
     style: CellStyle,
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
+    last: String,
   ): CellStyle =
     if (c >= count) {
       style
     } else {
-      val next = cells(rowStart + c) match {
-        case Cell.Continuation(_) => style
+      val (next, emitted) = cells(rowStart + c) match {
+        case Cell.Continuation(_) => (style, last)
         case Cell.Glyph(symbol, glyphWidth, cellStyle) =>
           val tracked = ensureStyle(style, builder, capabilities, cellStyle)
           if (glyphWidth.columns === 2 && c + 1 >= limit) {
+            breakJoin(builder, last, " ", c)
             builder.append(' '): Unit
-            tracked
+            (tracked, " ")
           } else {
             val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else glyphWidth.columns
+            breakJoin(builder, last, symbol.value, c)
             builder.append(symbol.value): Unit
             appendSpaces(builder, glyphWidth.columns - terminalWidth)
-            tracked
+            (tracked, if (glyphWidth.columns - terminalWidth > 0) " " else symbol.value)
           }
       }
-      emitRowCells(cells, rowStart, c + 1, count, limit, next, builder, capabilities)
+      emitRowCells(cells, rowStart, c + 1, count, limit, next, builder, capabilities, emitted)
     }
+
+  /** The CHA to cell `c`'s column when `next` would join `last` (rule R2a) in a printed row. */
+  private def breakJoin(builder: java.lang.StringBuilder, last: String, next: String, c: Int): Unit =
+    if (joins(last, next)) builder.append(Sequences.cha(c + 1)): Unit else ()
+
+  /** True when `next` would join the previously emitted cluster `last` into one grapheme cluster on the wire (rule R2a): false for an
+    * empty `last` (the cursor was just placed) and on the ASCII fast path (both one printable ASCII character), else exactly one
+    * cluster by the segmenter.
+    */
+  def joins(last: String, next: String): Boolean =
+    if (last.isEmpty) false
+    else if (isAsciiPrintable(last) && isAsciiPrintable(next)) false
+    else Graphemes.count(last + next) === 1
+
+  private def isAsciiPrintable(s: String): Boolean = s.length === 1 && s.charAt(0) >= ' ' && s.charAt(0) <= '~'
 
   @tailrec
   private def loop(
@@ -362,17 +385,23 @@ object AnsiWriter {
     style: CellStyle,
     terminalWidth: Int,
   ): Acc = {
-    val cursor  = ensureCursor(acc.cursor, builder, x, y)
-    val tracked = ensureStyle(acc.style, builder, capabilities, style)
+    val continuing = acc.cursor match {
+      case CursorState.Known(current) => current.x.value === x && current.y.value === y
+      case CursorState.PendingWrap(_) | CursorState.Unknown => false
+    }
+    val cursor0    = if (continuing && joins(acc.last, symbol.value)) CursorState.Unknown else acc.cursor
+    val cursor     = ensureCursor(cursor0, builder, x, y)
+    val tracked    = ensureStyle(acc.style, builder, capabilities, style)
     builder.append(symbol.value): Unit
     appendSpaces(builder, columns - terminalWidth)
-    val nx      = x.toLong + columns.toLong
-    val after   =
+    val last       = if (columns - terminalWidth > 0) " " else symbol.value
+    val nx         = x.toLong + columns.toLong
+    val after      =
       if (nx >= right) CursorState.PendingWrap(NonNegInts.clamp(y.toLong))
       else CursorState.Known(Position(NonNegInts.clamp(nx), NonNegInts.clamp(y.toLong)))
-    val wide    = if (columns === 2) Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)).some else none[Position]
-    val _       = cursor
-    Acc(after, tracked, wide)
+    val wide       = if (columns === 2) Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)).some else none[Position]
+    val _          = cursor
+    Acc(after, tracked, wide, last)
   }
 
   private def ensureCursor(cursor: CursorState, builder: java.lang.StringBuilder, x: Int, y: Int): CursorState =

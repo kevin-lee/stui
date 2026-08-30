@@ -19,7 +19,7 @@ import scala.annotation.tailrec
   * printable text (segmented into clusters and written with the profile's widths under DECAWM pending wrap), CR, LF (at the scroll
   * region's bottom margin the region scrolls, its top row reaching the modelled scrollback only when the region starts at row one
   * and the screen is normal, the verified xterm and kitty rule; at the screen bottom the normal screen scrolls into the scrollback
-  * while the alternate screen refuses), Cursor Position, Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
+  * while the alternate screen refuses), Cursor Position, Cursor Horizontal Absolute (the writer's join break, 2026-08-31), Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
   * `ESC 8`, restoring the cursor, the wrap flag, and the style, or homing with defaults when nothing was saved), DECSTBM with and
   * without margins (both home the cursor, invalid margins refused), SGR (attributes, `4:n`, the named, indexed, and RGB colours, the
   * underline colour), and the private modes 25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, and 2026.
@@ -448,6 +448,7 @@ object TerminalModel {
 
   private def dispatch(profile: QuirkProfile, screen: Screen, body: String, fin: Char): Either[ModelError, Screen] = fin match {
     case 'H' => cup(screen, body)
+    case 'G' => cha(screen, body)
     case 'J' =>
       if (body === "2") screen.copy(buffer = Buffer.emptyWith(screen.buffer.policy, screen.buffer.area)).asRight[ModelError]
       else if (body.isEmpty || body === "0") eraseBelow(screen).asRight[ModelError]
@@ -459,7 +460,7 @@ object TerminalModel {
         screen.copy(region = none[Region], cursor = Position.origin, pendingWrap = false).asRight[ModelError]
       } else {
         val parts = body.split(";", -1).toVector
-        (parts.lift(0).flatMap(parseNumber), parts.lift(1).flatMap(parseNumber)) match {
+        (parts.headOption.flatMap(parseNumber), parts.lift(1).flatMap(parseNumber)) match {
           case (Some(top), Some(bottom)) if top >= 1 && top < bottom && bottom <= screen.buffer.area.height.value =>
             screen
               .copy(
@@ -486,9 +487,20 @@ object TerminalModel {
 
   private def unknown(body: String, fin: Char): Either[ModelError, Screen] = ModelError.Unknown("CSI " + body + fin.toString).asLeft[Screen]
 
+  /** Cursor Horizontal Absolute (the writer's join break of a printed row): the column within the current row, an error beyond the
+    * width, the pending wrap cleared.
+    */
+  private def cha(screen: Screen, body: String): Either[ModelError, Screen] = {
+    val column = if (body.isEmpty) 1 else parseNumber(body).getOrElse(1)
+    val x      = math.max(0, column - 1)
+    val target = Position(NonNegInts.clamp(x.toLong), screen.cursor.y)
+    if (x >= screen.buffer.area.width.value) ModelError.OutsideViewport(target).asLeft[Screen]
+    else screen.copy(cursor = target, pendingWrap = false).asRight[ModelError]
+  }
+
   private def cup(screen: Screen, body: String): Either[ModelError, Screen] = {
     val parts  = if (body.isEmpty) Vector.empty[String] else body.split(";", -1).toVector
-    val row    = parts.lift(0).flatMap(parseNumber).getOrElse(1)
+    val row    = parts.headOption.flatMap(parseNumber).getOrElse(1)
     val column = parts.lift(1).flatMap(parseNumber).getOrElse(1)
     val y      = math.max(0, row - 1)
     val x      = math.max(0, column - 1)
