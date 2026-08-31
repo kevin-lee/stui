@@ -28,12 +28,21 @@ object GlyphSymbolSpec extends Properties {
       if (cp >= 0xd800 && cp <= 0xdfff) true else hasUnpairedSurrogate(s, i + Character.charCount(cp))
     }
 
+  def expectedInvalidValueMessage(value: String): String =
+    raw"""Invalid value: ["$value"]. It must be exactly one extended grapheme cluster of valid UTF-16 with a non-zero display width (no control, format, or zero-width cluster)."""
+
+  def expectedInvalidValueMessageWithoutQuotes(value: String): String =
+    raw"""Invalid value: [$value]. It must be exactly one extended grapheme cluster of valid UTF-16 with a non-zero display width (no control, format, or zero-width cluster)."""
+
   override def tests: List[Test] = List(
     property("every glyph of a generated buffer round-trips through from", testBufferGlyphs),
     property("from agrees with the definition on nasty clusters", testDefinition),
+    example("apply() with a valid literal compiles", testApply),
     property("an accepted string is kept as is", testKept),
-    example("the empty string is rejected", Result.assert(GlyphSymbol.from("").isLeft)),
-    example("two clusters are rejected", Result.assert(GlyphSymbol.from("ab").isLeft)),
+    example("""apply("") should not compile""", testApplyEmptyString),
+    example("""from("")(an empty string) should return Left(error)""", testFromEmptyString),
+    example("""apply("ab") (two clusters) should not compile""", testApplyTwoClusters),
+    example("""from("ab") (two clusters) should return Left(error)""", testFromTwoClusters),
     example("a control is rejected", Result.assert(GlyphSymbol.from(cps(0x1b)).isLeft)),
     example("a tab is rejected", Result.assert(GlyphSymbol.from("\t").isLeft)),
     example("a lone combining mark is rejected", Result.assert(GlyphSymbol.from(cps(0x301)).isLeft)),
@@ -45,16 +54,25 @@ object GlyphSymbolSpec extends Properties {
     example("replacement is U+FFFD", GlyphSymbol.replacement.value ==== cps(0xfffd)),
     example(
       "the constants pass from",
-      Result.all(List(Result.assert(GlyphSymbol.from(" ").isRight), Result.assert(GlyphSymbol.from(cps(0xfffd)).isRight))),
+      Result.all(
+        List(
+          Result.assert(GlyphSymbol.from(" ").isRight),
+          Result.assert(GlyphSymbol.from(cps(0xfffd)).isRight),
+        )
+      ),
     ),
   )
 
   def testBufferGlyphs: Property =
-    BufferGens.buffer.forAll.map { buffer =>
-      Result.all(buffer.cells.toList.map {
-        case Cell.Glyph(symbol, _, _) => Result.assert(GlyphSymbol.from(symbol.value).isRight).log(s"rejected: ${symbol.value}")
-        case Cell.Continuation(_) => Result.success
-      })
+    for {
+      buffer <- BufferGens.buffer.log("buffer")
+    } yield {
+      Result.all(
+        buffer.cells.toList.map {
+          case Cell.Glyph(symbol, _, _) => Result.assert(GlyphSymbol.from(symbol.value).isRight).log(s"rejected: ${symbol.value}")
+          case Cell.Continuation(_) => Result.success
+        }
+      )
     }
 
   def testDefinition: Property =
@@ -63,6 +81,45 @@ object GlyphSymbolSpec extends Properties {
       Result.assert(GlyphSymbol.from(cluster).isRight === expected).log(s"cluster ${cluster.map(c => c.toInt.toHexString).mkString(",")}")
     }
 
+  def testApply: Result = {
+    import scala.compiletime.testing.typeCheckErrors
+
+    val actual = typeCheckErrors(
+      """
+        GlyphSymbol("가")
+        GlyphSymbol("0️⃣")
+        GlyphSymbol("ហ্𑎳")
+        GlyphSymbol("ഛ꧀ᮻ")
+        GlyphSymbol("𐭸")
+        GlyphSymbol("🆰‍⚛")
+        GlyphSymbol("ｹﾞ")
+        GlyphSymbol("򹆞𑵂")
+        GlyphSymbol("𐘂")
+        GlyphSymbol("ｹﾟ")
+        GlyphSymbol("🇮")
+        GlyphSymbol("˻")
+        GlyphSymbol("𑼇꫶𐨦")
+        GlyphSymbol("ન꧀𑨣")
+        GlyphSymbol("񻻏̪")
+        GlyphSymbol("🧞‍🰺")
+        GlyphSymbol("ᩆ𐨿ဧ")
+        GlyphSymbol("♟‍🶨")
+        GlyphSymbol("ឤ𑩇𑎎")
+        GlyphSymbol("📣‍🺖")
+        GlyphSymbol("𑵆񪿄")
+        GlyphSymbol("2️⃣")
+        GlyphSymbol("ｾﾞ")
+        GlyphSymbol("🇭")
+        GlyphSymbol("🇼🇦")
+        GlyphSymbol("🤜‍🫯")
+      """
+    ).map(_.message).mkString("\n")
+
+    val expected = ""
+
+    actual ==== expected
+  }
+
   def testKept: Property =
     NastyGens.cluster.forAll.map { cluster =>
       GlyphSymbol.from(cluster) match {
@@ -70,5 +127,51 @@ object GlyphSymbolSpec extends Properties {
         case Left(_) => Result.success
       }
     }
+
+  def testApplyEmptyString: Result = {
+    import scala.compiletime.testing.typeCheckErrors
+
+    val actual = typeCheckErrors(
+      """
+      val _ = GlyphSymbol("")
+      """
+    ).map(_.message).mkString("\n")
+
+    val expected =
+      expectedInvalidValueMessage("")
+
+    actual ==== expected
+  }
+
+  def testFromEmptyString: Result = {
+    val actual = GlyphSymbol.from("")
+
+    val expected = expectedInvalidValueMessageWithoutQuotes("").asLeft[GlyphSymbol]
+
+    actual ==== expected
+  }
+
+  def testApplyTwoClusters: Result = {
+    import scala.compiletime.testing.typeCheckErrors
+
+    val actual = typeCheckErrors(
+      """
+      val _ = GlyphSymbol("ab")
+      """
+    ).map(_.message).mkString("\n")
+
+    val expected =
+      expectedInvalidValueMessage("ab")
+
+    actual ==== expected
+  }
+
+  def testFromTwoClusters: Result = {
+    val actual = GlyphSymbol.from("ab")
+
+    val expected = expectedInvalidValueMessageWithoutQuotes("ab").asLeft[GlyphSymbol]
+
+    actual ==== expected
+  }
 
 }
