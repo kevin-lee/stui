@@ -11,10 +11,8 @@ import stui.core.internal.NonNegInts
 import stui.core.layout.{Constraint, Layout, Percent}
 import stui.core.spi.ScreenMode
 import stui.core.style.{Color, Style, UnderlineStyle}
-import stui.core.terminal.{CompletedFrame, RedrawReason, RenderStats}
+import stui.core.terminal.{CompletedFrame, RedrawReason, RenderStats, Terminal}
 import stui.core.text.{Line, Span, Text}
-import stui.terminal.TerminalSession
-import stui.terminal.TerminalSession.*
 import stui.widgets.{
   Block,
   BorderSet,
@@ -47,10 +45,8 @@ import stui.widgets.Table.*
 import stui.widgets.Tabs.*
 
 import java.util.concurrent.atomic.AtomicReference
-import scala.annotation.tailrec
-import scala.concurrent.duration.*
 
-/** The stui demo (M2b): a titled header, a [[Tabs]] strip selecting one of four pages - the scrollable body of long wrapped Korean,
+/** The stui demo (M2c): a titled header, a [[Tabs]] strip selecting one of four pages - the scrollable body of long wrapped Korean,
   * Japanese, and emoji text with a [[Scrollbar]] beside it (M2a), a [[ListView]] with a scrollbar, a [[Table]] of Unicode samples,
   * and three [[Gauge]]s - an event log pane (a [[LogView]] following its tail, alternate screen only), and a status footer. Every
   * glyph comes from the capabilities ([[BorderSet.forCapabilities]], [[Tabs.dividerFor]], the scrollbar and gauge sets, the highlight
@@ -58,7 +54,11 @@ import scala.concurrent.duration.*
   * Tab moves the key focus between the page and the log, Up / Down / PageUp / PageDown / Home / End drive the focused pane (the
   * scroll offset, the list or row selection, or the gauge), `+` / `-` adjust the gauge, a click selects a list item or a table row,
   * the wheel scrolls the pane under the mouse (hit-region routing through [[ItemRegions]]), `q` or Control-C quits, `r` forces a
-  * redraw, `p` and `P` print above the UI, and a paste is shown.
+  * redraw, `p` and `P` print above the UI, `!` deliberately crashes (the exception restore path under a pseudo-terminal driver),
+  * and a paste is shown.
+  *
+  * The demo logic is shared by two drivers over [[drawFrame]] and [[applyEvent]]: the blocking poll loop of the JVM and Native
+  * `Main`, and the subscription-driven Node `Main` (design doc 6.3, nothing may block on JS).
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -265,12 +265,12 @@ object Demo {
       case _ => (area, area)
     }
 
-  private def isInline(session: TerminalSession): Boolean = session.terminal.options.screenMode match {
+  private def isInline(terminal: Terminal): Boolean = terminal.options.screenMode match {
     case ScreenMode.AlternateScreen => false
     case ScreenMode.Inline(_) => true
   }
 
-  private def borders(session: TerminalSession): BorderSet = BorderSet.forCapabilities(session.capabilities)
+  private def borders(terminal: Terminal): BorderSet = BorderSet.forCapabilities(terminal.capabilities)
 
   /** The highlight symbol: the right-pointing triangle (U+25B6, East Asian Ambiguous) under Unicode glyphs, `>` otherwise. */
   private def symbol(capabilities: Capabilities): Line = capabilities.effectiveGlyphs match {
@@ -290,23 +290,23 @@ object Demo {
   private def logBlock(set: BorderSet): Block = titled(set, " events ", Color.Yellow)
 
   /** The focused page's inner rows at the current viewport (what PageUp / PageDown step by), at least 1. */
-  private def pageRows(session: TerminalSession): Int =
-    math.max(1, paneAreas(session.terminal.viewport, isInline(session)).page.height.value - 2)
+  private def pageRows(terminal: Terminal): Int =
+    math.max(1, paneAreas(terminal.viewport, isInline(terminal)).page.height.value - 2)
 
   /** The log pane's inner rows at the current viewport. */
-  private def logRows(session: TerminalSession): NonNegInt =
-    paneAreas(session.terminal.viewport, isInline(session))
+  private def logRows(terminal: Terminal): NonNegInt =
+    paneAreas(terminal.viewport, isInline(terminal))
       .log
-      .fold(NonNegInt(0))(area => logBlock(borders(session)).inner(area).height)
+      .fold(NonNegInt(0))(area => logBlock(borders(terminal)).inner(area).height)
 
   /** Renders one frame; the corrected states land in `corrections` (the returned-state pattern captured out of the render closure,
     * the `Rendering.statefulWith` shape).
     */
-  private def view(state: State, session: TerminalSession, corrections: AtomicReference[Corrections])(canvas: Canvas): Unit = {
-    val set   = borders(session)
-    val caps  = session.capabilities
-    val panes = paneAreas(canvas.area, isInline(session))
-    renderHeader(session, set, panes.header, canvas)
+  private def view(state: State, terminal: Terminal, corrections: AtomicReference[Corrections])(canvas: Canvas): Unit = {
+    val set   = borders(terminal)
+    val caps  = terminal.capabilities
+    val panes = paneAreas(canvas.area, isInline(terminal))
+    renderHeader(terminal, set, panes.header, canvas)
     renderTabs(state, caps, panes.tabs, canvas, corrections)
     Page.of(state.page) match {
       case Page.ScrollPage => renderScrollPage(state, set, caps, panes.page, canvas, corrections)
@@ -315,21 +315,21 @@ object Demo {
       case Page.GaugePage => renderGaugePage(state, set, caps, panes.page, canvas)
     }
     panes.log.foreach(area => renderLog(state, set, area, canvas, corrections))
-    renderFooter(state, session, set, panes.footer, canvas)
+    renderFooter(state, terminal, set, panes.footer, canvas)
   }
 
-  private def renderHeader(session: TerminalSession, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
+  private def renderHeader(terminal: Terminal, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
     val block =
-      Block.bordered.withBorderSet(set).withTitle(Line.raw(" stui M2b demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
+      Block.bordered.withBorderSet(set).withTitle(Line.raw(" stui M2c demo ").centered).withBorderStyle(Style.empty.withFg(Color.Cyan))
     block.render(area, canvas)
-    val caps  = session.capabilities
+    val caps  = terminal.capabilities
     val line  = Line.of(
       Span.styled("colours ", Style.empty.dim),
       Span.raw(caps.colors.show),
       Span.styled("  ssh ", Style.empty.dim),
       Span.raw(yesNo(caps.ssh)),
       Span.styled("  mode ", Style.empty.dim),
-      Span.raw(modeName(session)),
+      Span.raw(modeName(terminal)),
       Span.styled("  sync ", Style.empty.dim),
       Span.raw(yesNo(caps.syncOutput)),
       Span.styled("  multiplexer ", Style.empty.dim),
@@ -460,11 +460,11 @@ object Demo {
     corrections.updateAndGet(_.copy(logState = corrected)): Unit
   }
 
-  private def renderFooter(state: State, session: TerminalSession, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
+  private def renderFooter(state: State, terminal: Terminal, set: BorderSet, area: Rect, canvas: Canvas): Unit = {
     val block = Block.bordered.withBorderSet(set).withBorderStyle(Style.empty.withFg(Color.Green))
     block.render(area, canvas)
     val inner = block.inner(area)
-    val size  = session.terminal.viewport.size
+    val size  = terminal.viewport.size
     val stats =
       state.stats.fold("-")(s => s"${s.bytes.value.toString} B, ${s.cells.value.toString} cells, ${s.duration.toMicros.toString} us")
     val log   = s"${state.logState.anchor.value.toString}${if (state.logState.following) " f" else ""}"
@@ -513,7 +513,7 @@ object Demo {
     case Pane.Log => "log"
   }
 
-  private def modeName(session: TerminalSession): String = session.terminal.options.screenMode match {
+  private def modeName(terminal: Terminal): String = terminal.options.screenMode match {
     case ScreenMode.AlternateScreen => "alt"
     case ScreenMode.Inline(height) => s"inline(${height.value.toString})"
   }
@@ -536,19 +536,19 @@ object Demo {
     state.copy(gauge = NonNegInts.clamp(math.min(GaugeTotal.value.toLong, state.gauge.value.toLong + delta.toLong)))
 
   /** The log scrolled by `delta` rows (negative is up) through the pure helpers. */
-  private def logBy(session: TerminalSession, state: State, delta: Int): State = {
+  private def logBy(terminal: Terminal, state: State, delta: Int): State = {
     val rows = NonNegInts.clamp(math.abs(delta).toLong)
     val next =
-      if (delta < 0) LogView.scrolledUp(state.logState, state.log, logRows(session), rows)
-      else LogView.scrolledDown(state.logState, state.log, logRows(session), rows)
+      if (delta < 0) LogView.scrolledUp(state.logState, state.log, logRows(terminal), rows)
+      else LogView.scrolledDown(state.logState, state.log, logRows(terminal), rows)
     state.copy(logState = next)
   }
 
   /** The focused pane moved by `delta` (negative is up): the log, the scroll offset, the list or row selection, or the gauge; the
     * render clamps.
     */
-  private def moveFocused(session: TerminalSession, state: State, delta: Int): State = state.pane match {
-    case Pane.Log => logBy(session, state, delta)
+  private def moveFocused(terminal: Terminal, state: State, delta: Int): State = state.pane match {
+    case Pane.Log => logBy(terminal, state, delta)
     case Pane.Body =>
       Page.of(state.page) match {
         case Page.ScrollPage => state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
@@ -558,9 +558,9 @@ object Demo {
       }
   }
 
-  private def pageStep(session: TerminalSession, state: State): Int = state.pane match {
-    case Pane.Body => pageRows(session)
-    case Pane.Log => math.max(1, logRows(session).value)
+  private def pageStep(terminal: Terminal, state: State): Int = state.pane match {
+    case Pane.Body => pageRows(terminal)
+    case Pane.Log => math.max(1, logRows(terminal).value)
   }
 
   private def toTopFocused(state: State): State = state.pane match {
@@ -606,22 +606,22 @@ object Demo {
     }
 
   /** The wheel scrolls the pane under the mouse, resolved through the frame's hit regions (design doc 6.6). */
-  private def wheel(session: TerminalSession, state: State, over: Option[RegionId], delta: Int): State =
+  private def wheel(terminal: Terminal, state: State, over: Option[RegionId], delta: Int): State =
     over.fold(state) { id =>
       if (id === bodyRegion) state.copy(scroll = Scrolling.scrolledBy(state.scroll, delta, 0))
       else if (ItemRegions.owns(listRegion, id)) state.copy(list = state.list.movedBy(delta))
       else if (ItemRegions.owns(tableRegion, id)) state.copy(table = state.table.rowsMovedBy(delta))
-      else if (id === logRegion) logBy(session, state, delta)
+      else if (id === logRegion) logBy(terminal, state, delta)
       else state
     }
 
-  private def mouseStep(session: TerminalSession, state: State, mouse: MouseEvent, completed: CompletedFrame): State = {
+  private def mouseStep(terminal: Terminal, state: State, mouse: MouseEvent, completed: CompletedFrame): State = {
     val regions: Regions = completed.frame.regions
     val over             = regions.at(mouse.position)
     val next             = mouse.kind match {
       case MouseEventKind.Down(MouseButton.Left) => click(state, over)
-      case MouseEventKind.ScrollUp => wheel(session, state, over, -WheelStep)
-      case MouseEventKind.ScrollDown => wheel(session, state, over, WheelStep)
+      case MouseEventKind.ScrollUp => wheel(terminal, state, over, -WheelStep)
+      case MouseEventKind.ScrollDown => wheel(terminal, state, over, WheelStep)
       case _ => state
     }
     next.copy(hovered = over)
@@ -629,14 +629,17 @@ object Demo {
 
   private def isDigitPage(c: Char): Boolean = c >= '1' && c <= '4'
 
+  /* the deliberate crash for verifying the exception restore path under a pseudo-terminal driver (issue 23) */
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  private def crash(): State = throw new RuntimeException("stui demo crash test") // scalafix:ok DisableSyntax.throw
+
   /** One event folded into the state (the event was already logged and remembered by the loop). */
-  private def step(session: TerminalSession, state: State, event: Event, completed: CompletedFrame): State = event match {
+  private def step(terminal: Terminal, state: State, event: Event, completed: CompletedFrame): State = event match {
     case Event.Key(KeyEvent(KeyCode.Char('r'), _, _)) =>
-      session.terminal.redraw(RedrawReason.Requested)
+      terminal.redraw(RedrawReason.Requested)
       state
     case Event.Key(KeyEvent(KeyCode.Char('p'), _, _)) =>
-      session
-        .terminal
+      terminal
         .print(
           Line.of(
             Span.raw(s"log ${state.printed.toString}: "),
@@ -646,8 +649,7 @@ object Demo {
         )
       state.copy(printed = state.printed + 1)
     case Event.Key(KeyEvent(KeyCode.Char('P'), _, _)) =>
-      session
-        .terminal
+      terminal
         .print(
           Text.of(
             Line.of(Span.styled(s"=== block ${state.printed.toString} ===", Style.empty.bold)),
@@ -658,34 +660,36 @@ object Demo {
       state.copy(printed = state.printed + 1)
     case Event.Key(KeyEvent(KeyCode.Char('+'), _, _)) => gaugeBy(state, 1)
     case Event.Key(KeyEvent(KeyCode.Char('-'), _, _)) => gaugeBy(state, -1)
+    case Event.Key(KeyEvent(KeyCode.Char('!'), _, _)) => crash()
     case Event.Key(KeyEvent(KeyCode.Char(c), _, _)) if isDigitPage(c) =>
       state.copy(page = state.page.select(NonNegInts.clamp((c - '1').toLong).some))
     case Event.Key(KeyEvent(KeyCode.Tab, _, _)) =>
-      if (isInline(session)) state else state.copy(pane = togglePane(state.pane))
+      if (isInline(terminal)) state else state.copy(pane = togglePane(state.pane))
     case Event.Key(KeyEvent(KeyCode.Left, _, _)) => sideways(state, -1)
     case Event.Key(KeyEvent(KeyCode.Right, _, _)) => sideways(state, 1)
-    case Event.Key(KeyEvent(KeyCode.Up, _, _)) => moveFocused(session, state, -1)
-    case Event.Key(KeyEvent(KeyCode.Down, _, _)) => moveFocused(session, state, 1)
-    case Event.Key(KeyEvent(KeyCode.PageUp, _, _)) => moveFocused(session, state, -pageStep(session, state))
-    case Event.Key(KeyEvent(KeyCode.PageDown, _, _)) => moveFocused(session, state, pageStep(session, state))
+    case Event.Key(KeyEvent(KeyCode.Up, _, _)) => moveFocused(terminal, state, -1)
+    case Event.Key(KeyEvent(KeyCode.Down, _, _)) => moveFocused(terminal, state, 1)
+    case Event.Key(KeyEvent(KeyCode.PageUp, _, _)) => moveFocused(terminal, state, -pageStep(terminal, state))
+    case Event.Key(KeyEvent(KeyCode.PageDown, _, _)) => moveFocused(terminal, state, pageStep(terminal, state))
     case Event.Key(KeyEvent(KeyCode.Home, _, _)) => toTopFocused(state)
     case Event.Key(KeyEvent(KeyCode.End, _, _)) => toBottomFocused(state)
     case Event.Resize(_) =>
-      session.terminal.redraw(RedrawReason.Resize)
+      terminal.redraw(RedrawReason.Resize)
       state
-    case Event.Mouse(mouse) => mouseStep(session, state, mouse, completed)
+    case Event.Mouse(mouse) => mouseStep(terminal, state, mouse, completed)
     case Event.Paste(text) => state.copy(paste = text.some)
     case Event.FocusGained => state.copy(focused = true)
     case Event.FocusLost => state.copy(focused = false)
     case Event.Key(_) => state
   }
 
-  /** Draws, waits for an event, and loops until `q`, Control-C, or a termination signal. Returns why it stopped. */
-  @tailrec
-  def loop(session: TerminalSession, state: State): String = {
-    /* the corrected states are captured out of the render closure through a reference (the Rendering.statefulWith shape) */
+  /** One frame: renders, captures the corrected widget states out of the render closure through a reference (the
+    * `Rendering.statefulWith` shape), and returns the state carrying them plus the completed frame. Shared by the blocking driver
+    * on the JVM and Native and the subscription driver on Node, so the two cannot drift.
+    */
+  def drawFrame(terminal: Terminal, state: State): (State, CompletedFrame) = {
     val corrections = new AtomicReference(Corrections(state.scroll, state.logState, state.page, state.list, state.table))
-    val completed   = session.terminal.draw(view(state, session, corrections))
+    val completed   = terminal.draw(view(state, terminal, corrections))
     val c           = corrections.get()
     val next        =
       state.copy(
@@ -697,14 +701,22 @@ object Demo {
         list = c.list,
         table = c.table,
       )
-    session.events.poll(100.millis) match {
-      case Some(Event.Key(KeyEvent(KeyCode.Char('q'), _, _))) => "quit"
-      case Some(Event.Key(KeyEvent(KeyCode.Char('c'), modifiers, _))) if modifiers.contains(KeyModifier.Control) => "interrupted"
-      case Some(event) =>
-        val logged = next.copy(log = next.log.append(eventLine(next.frames, event)), lastEvent = event.some)
-        loop(session, step(session, logged, event, completed))
-      case None => if (session.terminationRequested) "signal" else loop(session, next)
-    }
+    (next, completed)
+  }
+
+  /** What one event does to the demo: quit with a reason, or continue with the next state. */
+  enum Outcome {
+    case Quit(reason: String)
+    case Continue(state: State)
+  }
+
+  /** One event folded in: `Quit` for `q` and Control-C, otherwise the event is logged, remembered, and stepped. */
+  def applyEvent(terminal: Terminal, state: State, event: Event, completed: CompletedFrame): Outcome = event match {
+    case Event.Key(KeyEvent(KeyCode.Char('q'), _, _)) => Outcome.Quit("quit")
+    case Event.Key(KeyEvent(KeyCode.Char('c'), modifiers, _)) if modifiers.contains(KeyModifier.Control) => Outcome.Quit("interrupted")
+    case Event.Key(_) | Event.Mouse(_) | Event.Resize(_) | Event.Paste(_) | Event.FocusGained | Event.FocusLost =>
+      val logged = state.copy(log = state.log.append(eventLine(state.frames, event)), lastEvent = event.some)
+      Outcome.Continue(step(terminal, logged, event, completed))
   }
 
 }

@@ -24,6 +24,16 @@ object ProbeResult {
   /** No probe ran: nothing collected, the initial decoder state. */
   val empty: ProbeResult = ProbeResult(Vector.empty[Reply], Vector.empty[Event], DecoderState.initial, false)
 
+  /** True when the DA1 sentinel is among the replies, which ends the probe (design doc 7.3, decision D15). Shared by the blocking
+    * probe loop on the JVM and Native and the callback-driven one on Node.
+    */
+  def sentinelReached(replies: Vector[Reply]): Boolean = replies.exists {
+    case Reply.PrimaryDeviceAttributes(_) => true
+    case Reply.CursorPosition(_) | Reply.PrivateModeReport(_, _) | Reply.TermcapReply(_, _) | Reply.VersionReply(_) |
+        Reply.SecondaryDeviceAttributes(_) =>
+      false
+  }
+
   extension (result: ProbeResult) {
 
     /** The 0-based cursor row of the first Cursor Position Report, the inline entry anchor. */

@@ -39,12 +39,7 @@ object Probe {
     replies: Vector[Reply],
     events: Vector[Event],
   ): ProbeResult = {
-    val sentinel  = replies.exists {
-      case Reply.PrimaryDeviceAttributes(_) => true
-      case Reply.CursorPosition(_) | Reply.PrivateModeReport(_, _) | Reply.TermcapReply(_, _) | Reply.VersionReply(_) |
-          Reply.SecondaryDeviceAttributes(_) =>
-        false
-    }
+    val sentinel  = ProbeResult.sentinelReached(replies)
     val remaining = deadline - clock.monotonicNanos()
     if (sentinel || remaining <= 0L) {
       ProbeResult(replies, events, state.expecting(false), sentinel)

@@ -54,7 +54,7 @@ object PlatformTerminal {
                 StdinReader.input,
                 JvmSignals.resized,
                 () => tty.size(),
-                DecodingEventSource.effectiveSize(options),
+                EffectiveSize.of(options),
                 options.escTimeout.resolve(capabilities.ssh),
                 Clock.system,
                 probe.decoder,

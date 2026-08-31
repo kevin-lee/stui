@@ -7,10 +7,11 @@ import stui.core.buffer.{Buffer, Cell}
 import stui.core.style.CellStyle
 import stui.testkit.{Assertions, TerminalModel}
 import stui.testkit.TerminalModel.{QuirkProfile, Screen}
+import stui.unicode.Graphemes
 import stui.unicode.internal.IntOps.*
 
 /** The writer's rules as laws over the oracle (design doc 7.1 and 12): the round trip under random capabilities (the expected screen
-  * carries the writer's own style normalisation), the sanitisation law, R1, one move per row,
+  * carries the writer's own style normalisation), the sanitisation law, R1, one move per row plus the R2a join breaks,
   * R8, R10, determinism, the style reset, and orphan continuations.
   *
   * @author Kevin Lee
@@ -37,7 +38,7 @@ object AnsiWriterLawsSpec extends Properties {
     property("two chained presents from a blank screen show the next buffer", testChained),
     property("the style is the default after a present, on both sides", testStyleReset),
     property("a full row leaves a pending wrap (R1)", testPendingWrap),
-    property("a full row from a blank screen moves the cursor once", testOneMove),
+    property("a full row from a blank screen moves the cursor once plus the join breaks (R2a)", testOneMove),
     property("updates outside the viewport emit nothing (R8)", testOutside),
     property("the byte budget holds (R10)", testBudget),
     property("present is deterministic", testDeterministic),
@@ -129,10 +130,29 @@ object AnsiWriterLawsSpec extends Properties {
       }
     }
 
+  /* rule R2a places the cursor before a glyph that would join the previously emitted cluster (a lone regional indicator after
+   * another, a standalone mark after any glyph), so a full row moves the cursor once plus once per join break (the capabilities
+   * match the profile here, so the emitted cluster is always the cell's own symbol, never a shadow space) */
+  private def joinBreaks(buffer: Buffer): Int =
+    buffer
+      .rows
+      .headOption
+      .fold(0) { row =>
+        row
+          .foldLeft((0, none[String])) {
+            case ((breaks, last), Cell.Glyph(symbol, _, _)) =>
+              (breaks + (if (last.exists(previous => Graphemes.joins(previous, symbol.value))) 1 else 0), symbol.value.some)
+            case ((breaks, last), Cell.Continuation(_)) => (breaks, last)
+          }
+          ._1
+      }
+
   def testOneMove: Property =
     WriterGens.rowBuffer.forAll.map { buffer =>
+      val expected = 1 + joinBreaks(buffer)
       AnsiWriter.present(WriterState.initial, WriterGens.losslessFor(QuirkProfile.default), buffer.area, Buffer.allUpdates(buffer)) match {
-        case (_, output) => Result.assert(cupPattern.findAllIn(output).length === 1).log(output.replace(Sequences.Esc, "ESC"))
+        case (_, output) =>
+          Result.assert(cupPattern.findAllIn(output).length === expected).log(output.replace(Sequences.Esc, "ESC"))
       }
     }
 
