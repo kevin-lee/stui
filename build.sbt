@@ -113,9 +113,9 @@ lazy val examples       = module("examples", crossProject(JVMPlatform, JSPlatfor
 lazy val examplesJvm    = examples
   .jvm
   .settings(
-    run / fork           := true,
-    run / connectInput   := true,
-    run / outputStrategy := Some(StdoutOutput),
+    run / fork            := true,
+    run / connectInput    := true,
+    run / outputStrategy  := Some(StdoutOutput),
     /* the CI PTY smoke reads the classpath from this file (parsing sbt's stdout for it proved fragile on the runners) */
     writeRuntimeClasspath := {
       val classpath = (Runtime / fullClasspath).value.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)
