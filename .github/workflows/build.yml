@@ -109,7 +109,8 @@ jobs:
       - name: "PTY smoke (jvm)"
         if: matrix.platform == 'jvm'
         run: |
-          CP=$(sbt --error "export examplesJVM/Runtime/fullClasspath" | tail -1)
+          sbt examplesJVM/writeRuntimeClasspath
+          CP=$(cat modules/examples/jvm/target/runtime-classpath.txt)
           python3 scripts/pty-smoke/smoke.py -- java -cp "$CP" stui.examples.Main
           python3 scripts/pty-smoke/smoke.py -- java -cp "$CP" stui.examples.Main inline
 

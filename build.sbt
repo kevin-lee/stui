@@ -116,9 +116,17 @@ lazy val examplesJvm    = examples
     run / fork           := true,
     run / connectInput   := true,
     run / outputStrategy := Some(StdoutOutput),
+    /* the CI PTY smoke reads the classpath from this file (parsing sbt's stdout for it proved fragile on the runners) */
+    writeRuntimeClasspath := {
+      val classpath = (Runtime / fullClasspath).value.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)
+      IO.write(target.value / "runtime-classpath.txt", classpath)
+    },
   )
 lazy val examplesJs     = examples.js.settings(jsSettings).settings(scalaJSUseMainModuleInitializer := true)
 lazy val examplesNative = examples.native.settings(nativeSettings)
+
+lazy val writeRuntimeClasspath =
+  taskKey[Unit]("Writes the runtime classpath to target/runtime-classpath.txt for the CI PTY smoke")
 
 lazy val props =
   new {
