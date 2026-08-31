@@ -199,7 +199,7 @@ def module(projectName: String, crossProject: CrossProject.Builder): CrossProjec
     .settings(
       name                              := projectName,
       scalacOptions ++= List("-no-indent", "-explain"),
-      wartremoverErrors ++= Warts.allBut(Wart.Any, Wart.Nothing),
+      wartremoverErrors ++= Warts.allBut(Wart.Any, Wart.Nothing, Wart.ImplicitParameter),
       Compile / console / scalacOptions :=
         (console / scalacOptions)
           .value
