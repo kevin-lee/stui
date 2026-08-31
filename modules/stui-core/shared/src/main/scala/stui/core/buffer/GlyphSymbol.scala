@@ -6,16 +6,16 @@ import stui.unicode.internal.IntOps.*
 
 /** The symbol of a [[Cell.Glyph]]: exactly one extended grapheme cluster of valid UTF-16 with a non-zero display width under the
   * bundled tables, so a control, a format character, a lone combining mark, a lone surrogate, the empty string, and several clusters are
-  * not symbols (decision D14, design doc 6.5 and principle 9). No literal constructor exists because the validator runs the segmenter,
-  * which the compiler cannot fold: construct with [[GlyphSymbol.from]] (a compile-time macro over the real tables is a later addition).
-  */
-/** @author Kevin Lee
+  * not symbols (decision D14, design doc 6.5 and principle 9). A literal is checked at compile time by [[GlyphSymbol.apply]], which runs
+  * the real segmenter and the real width tables in a macro, so `GlyphSymbol("ab")` does not compile. A runtime value goes through
+  * [[GlyphSymbol.from]].
+  *
+  * @author Kevin Lee
   * @since 2026-08-29
   */
 type GlyphSymbol = GlyphSymbol.Type
-object GlyphSymbol extends InlinedRefined[String], CatsHash[String], CatsEq[String], CatsShow[String] {
 
-  private val Replacement = apply("\ufffd")
+object GlyphSymbol extends InlinedRefined[String], CatsHash[String], CatsEq[String], CatsShow[String] {
 
   private val VariationSelector16: Int = 0xfe0f
 
@@ -25,21 +25,16 @@ object GlyphSymbol extends InlinedRefined[String], CatsHash[String], CatsEq[Stri
   override inline def inlinedPredicate(inline a: String): Boolean = GlyphSymbolValidator.Macros.isValidGlyphSymbol(a)
 
   /** The message for a rejected string. */
-  override def invalidReason(a: String): String =
-    expectedMessage(
-      inlinedExpectedValue
-    )
+  override def invalidReason(a: String): String = expectedMessage(inlinedExpectedValue)
 
   /** One cluster, valid UTF-16, non-zero width under the bundled tables. */
   override def predicate(a: String): Boolean = GlyphSymbolValidator.isValidGlyphSymbol(a)
 
-  /* the two constants are valid by inspection (a space and the replacement character) and `GlyphSymbolSpec` asserts `from` accepts
-   * them, which is why `unsafeFrom` is acceptable here */
   /** The space, the symbol of a blank cell. */
-  val space: GlyphSymbol = unsafeFrom(" ")
+  val space: GlyphSymbol = apply(" ")
 
   /** U+FFFD, the symbol written for invalid input. */
-  val replacement: GlyphSymbol = Replacement
+  val replacement: GlyphSymbol = apply("\ufffd")
 
   /** The symbol of a cluster the canvas has already measured. The canvas only passes valid clusters, so the fallback to [[replacement]]
     * is unreachable. The cost is one extra segmentation per written cell (measured later).
