@@ -235,7 +235,7 @@ object TerminalModelSpec extends Properties {
           Vector(
             Cell.glyph(glyph, GlyphWidth.One, CellStyle.default),
             Cell.blank,
-            Cell.glyph(GlyphSymbol.unsafeFrom("a"), GlyphWidth.One, CellStyle.default),
+            Cell.glyph(GlyphSymbol("a"), GlyphWidth.One, CellStyle.default),
           ),
         ),
       )

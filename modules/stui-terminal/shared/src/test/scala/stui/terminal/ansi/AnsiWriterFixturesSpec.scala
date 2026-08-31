@@ -66,7 +66,7 @@ object AnsiWriterFixturesSpec extends Properties {
           Vector(
             CellUpdate(
               at(4, 0),
-              Cell.glyph(stui.core.buffer.GlyphSymbol.unsafeFrom("a"), GlyphWidth.One, CellStyle.default.copy(fg = Color.Red)),
+              Cell.glyph(stui.core.buffer.GlyphSymbol("a"), GlyphWidth.One, CellStyle.default.copy(fg = Color.Red)),
             )
           ),
         )._2,
