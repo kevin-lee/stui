@@ -62,13 +62,15 @@ private[stui] object NativeSignals {
     }
   }
 
+  /* the C null for the unused old-action out-parameter, the M0-verified shape: letting the C library write the previous
+   * action into a posixlib-sized stackalloc smashed the stack on Linux (the M2c CI smoke crash, issue 23) */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def handle(signal: CInt, handler: CFuncPtr1[CInt, Unit]): Unit = {
-    val action   = stackalloc[psignal.sigaction]()
-    val previous = stackalloc[psignal.sigaction]()
+    val action = stackalloc[psignal.sigaction]()
     action._1 = handler
     psignal.sigemptyset(action.at2): Unit
     action._3 = 0
-    psignal.sigaction(signal, action, previous): Unit
+    psignal.sigaction(signal, action, null): Unit
   }
 
 }
