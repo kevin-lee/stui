@@ -49,6 +49,7 @@ lazy val stui = (project in file("."))
     terminalJs,
     terminalNative,
     examplesJvm,
+    examplesJs,
     examplesNative,
   )
 
@@ -101,13 +102,14 @@ lazy val terminalJvm    = terminal
 lazy val terminalJs     = terminal.js.settings(jsSettings)
 lazy val terminalNative = terminal.native.settings(nativeSettings)
 
-lazy val examples       = module("examples", crossProject(JVMPlatform, NativePlatform))
+lazy val examples       = module("examples", crossProject(JVMPlatform, JSPlatform, NativePlatform))
   .settings(noPublish)
   .settings(noDoc)
   .dependsOn(widgets, terminal)
 /* The demo owns the terminal, so it must run in its own process with standard input connected (an in-process `run` shares sbt's
- * standard input). Alternative launches: `java -cp` over `sbt "export examplesJVM/Runtime/fullClasspath"`, and for Native
- * `sbt examplesNative/nativeLink` then `modules/examples/native/target/scala-3.3.8/examples`. */
+ * standard input). Alternative launches: `java -cp` over `sbt "export examplesJVM/Runtime/fullClasspath"`, for Native
+ * `sbt examplesNative/nativeLink` then `modules/examples/native/target/scala-3.3.8/examples`, and for Node
+ * `sbt examplesJS/fastLinkJS` then `node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js`. */
 lazy val examplesJvm    = examples
   .jvm
   .settings(
@@ -115,6 +117,7 @@ lazy val examplesJvm    = examples
     run / connectInput   := true,
     run / outputStrategy := Some(StdoutOutput),
   )
+lazy val examplesJs     = examples.js.settings(jsSettings).settings(scalaJSUseMainModuleInitializer := true)
 lazy val examplesNative = examples.native.settings(nativeSettings)
 
 lazy val props =

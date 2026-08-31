@@ -31,6 +31,7 @@ object ProbeSpec extends Properties {
   override def tests: List[Test] = List(
     example("the batch asks 2026, RGB and Tc, the version, DA2, the cursor, and DA1 last", testBatch),
     example("the result readers pick the right replies", testReaders),
+    example("the sentinel is reached only by a DA1 reply", testSentinelReached),
     example("the sync answers map 0 to 4 as the specification says", testSyncAnswers),
     example(
       "an empty result patches nothing",
@@ -52,6 +53,30 @@ object ProbeSpec extends Properties {
             Sequences.Csi + ">c" + Sequences.Csi + "6n" + Sequences.Csi + "c",
         ),
         Result.assert(ProbeQueries.batch.endsWith(Sequences.Csi + "c")).log("the sentinel is last"),
+      )
+    )
+
+  def testSentinelReached: Result =
+    Result.all(
+      List(
+        Result.assert(ProbeResult.sentinelReached(Vector(Reply.PrimaryDeviceAttributes(Vector(64, 4))))).log("DA1"),
+        Result
+          .assert(
+            ProbeResult.sentinelReached(
+              Vector(Reply.PrivateModeReport(2026, 2), rgbValid, Reply.PrimaryDeviceAttributes(Vector.empty[Int]))
+            )
+          )
+          .log("DA1 among others"),
+        Result.assert(!ProbeResult.sentinelReached(Vector(Reply.PrivateModeReport(2026, 2)))).log("DECRPM alone"),
+        Result.assert(!ProbeResult.sentinelReached(Vector(rgbValid))).log("XTGETTCAP alone"),
+        Result.assert(!ProbeResult.sentinelReached(Vector(Reply.VersionReply("iTerm2 3.6.11")))).log("XTVERSION alone"),
+        Result
+          .assert(!ProbeResult.sentinelReached(Vector(Reply.SecondaryDeviceAttributes(Vector(64, 2500, 0)))))
+          .log("DA2 alone"),
+        Result
+          .assert(!ProbeResult.sentinelReached(Vector(Reply.CursorPosition(Position(NonNegInt(0), NonNegInt(3))))))
+          .log("CPR alone"),
+        Result.assert(!ProbeResult.sentinelReached(Vector.empty[Reply])).log("empty"),
       )
     )
 

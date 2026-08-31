@@ -132,20 +132,3 @@ final class DecodingEventSource(
     }
 
 }
-
-object DecodingEventSource {
-
-  /** The `Resize` payload mapping of the D12 under-run rule: the terminal size on the alternate screen, the width with the height
-    * clamped to the requested inline height in inline mode.
-    */
-  def effectiveSize(options: stui.core.spi.TerminalOptions): Size => Size = options.screenMode match {
-    case stui.core.spi.ScreenMode.AlternateScreen => identity
-    case stui.core.spi.ScreenMode.Inline(height) =>
-      size =>
-        Size(
-          size.width,
-          stui.core.internal.NonNegInts.min(stui.core.internal.NonNegInts.clamp(height.value.toLong), size.height),
-        )
-  }
-
-}
