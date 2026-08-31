@@ -70,7 +70,7 @@ private[stui] object NativeSignals {
     action._1 = handler
     psignal.sigemptyset(action.at2): Unit
     action._3 = 0
-    psignal.sigaction(signal, action, null): Unit
+    psignal.sigaction(signal, action, null): Unit // scalafix:ok DisableSyntax.null
   }
 
 }
