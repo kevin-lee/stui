@@ -85,12 +85,18 @@ def main():
         pump(0.2)
     report("the demo header appeared", args.marker in stripped(buf), f"marker {args.marker!r} not seen")
 
-    # 2. a key is accepted (a soft pump, layout is the local driver's business)
-    os.write(fd, b"2")
+    # 2. a key is accepted (a soft pump, layout is the local driver's business); a dead child makes the write fail with EIO
+    def send(data):
+        try:
+            os.write(fd, data)
+        except OSError:
+            pass
+
+    send(b"2")
     pump(0.5)
 
     # 3. q quits cleanly
-    os.write(fd, b"q")
+    send(b"q")
     exit_code = None
     deadline = time.time() + args.timeout
     while time.time() < deadline:
@@ -117,6 +123,8 @@ def main():
 
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} check(s): {', '.join(FAILURES)}")
+        print(f"--- output tail (escapes stripped, {len(buf)} raw bytes) ---")
+        print(stripped(buf)[-3000:])
         return 1
     print("OK")
     return 0
