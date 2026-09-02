@@ -36,6 +36,13 @@ object LayoutLawsSpec extends Properties {
         smallAreas,
         LayoutGens.fillOnly(Range.linear(1, 6), PosInt(5)),
         LayoutGens.equalFills(Range.linear(1, 6)),
+      ) ++
+      LayoutLaws.fixedArityLaws("small", smallAreas, LayoutGens.axis, LayoutGens.constraint(NonNegInt(30))) ++
+      LayoutLaws.fixedArityLaws(
+        "any",
+        GeometryGens.anyRect,
+        LayoutGens.axis,
+        Gen.frequency1(9 -> LayoutGens.constraint(NonNegInt(30)), 1 -> LayoutGens.extremeConstraint),
       )
 
 }

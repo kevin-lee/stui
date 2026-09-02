@@ -3,7 +3,7 @@ package stui.testkit.gen
 import hedgehog.{Gen, Range}
 import hedgehog.extra.refined4s.gens.NumGens
 import refined4s.types.numeric.{NonNegInt, PosInt}
-import stui.core.layout.{Constraint, Direction, Flex, Layout, Percent, Spacing}
+import stui.core.layout.{Axis, Constraint, Direction, Flex, Layout, Percent, Spacing}
 
 /** Generators for the layout vocabulary.
   *
@@ -24,6 +24,14 @@ object LayoutGens {
     4 -> nonNegIntTo(5).map(Spacing.spaceOf),
     2 -> nonNegIntTo(3).map(Spacing.overlapOf),
   )
+
+  /** Any axis: a direction with [[spacing]] and [[flex]]. */
+  val axis: Gen[Axis] =
+    for {
+      d  <- direction
+      sp <- spacing
+      fl <- flex
+    } yield Axis(d, sp, fl)
 
   /** 0 to 100. */
   val percent: Gen[Percent] = Gen.int(Range.linear(0, 100)).map(p => Percent.from(p).fold(_ => Percent.MinValue, identity))

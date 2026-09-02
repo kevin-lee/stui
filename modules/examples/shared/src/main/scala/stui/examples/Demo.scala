@@ -1,14 +1,18 @@
 package stui.examples
 
+import cats.Eq
+import cats.derived.strict.*
 import cats.syntax.all.*
 import refined4s.types.numeric.{NonNegInt, PosInt}
 import stui.core.buffer.Canvas
 import stui.core.capability.{Capabilities, GlyphSet}
 import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifier, MouseButton, MouseEvent, MouseEventKind}
+import stui.core.focus.FocusRing
+import stui.core.focus.FocusRing.*
 import stui.core.frame.{RegionId, Regions}
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
-import stui.core.layout.{Constraint, Layout, Percent}
+import stui.core.layout.{Axis, Constraint, Percent}
 import stui.core.spi.ScreenMode
 import stui.core.style.{Color, Style, UnderlineStyle}
 import stui.core.terminal.{CompletedFrame, RedrawReason, RenderStats, Terminal}
@@ -51,7 +55,7 @@ import java.util.concurrent.atomic.AtomicReference
   * and three [[Gauge]]s - an event log pane (a [[LogView]] following its tail, alternate screen only), and a status footer. Every
   * glyph comes from the capabilities ([[BorderSet.forCapabilities]], [[Tabs.dividerFor]], the scrollbar and gauge sets, the highlight
   * symbol). Digits `1` to `4` and a click on a title select the page, `Left` / `Right` move the table's column (the page elsewhere),
-  * Tab moves the key focus between the page and the log, Up / Down / PageUp / PageDown / Home / End drive the focused pane (the
+  * Tab moves the key focus between the page and the log (a [[FocusRing]] over the panes, decision D25), Up / Down / PageUp / PageDown / Home / End drive the focused pane (the
   * scroll offset, the list or row selection, or the gauge), `+` / `-` adjust the gauge, a click selects a list item or a table row,
   * the wheel scrolls the pane under the mouse (hit-region routing through [[ItemRegions]]), `q` or Control-C quits, `r` forces a
   * redraw, `p` and `P` print above the UI, `!` deliberately crashes (the exception restore path under a pseudo-terminal driver),
@@ -65,8 +69,8 @@ import java.util.concurrent.atomic.AtomicReference
   */
 object Demo {
 
-  /** Which pane the scroll keys drive: the page or the log. */
-  enum Pane {
+  /** Which pane the key focus can be on: the page or the log. */
+  enum Pane derives Eq {
     case Body
     case Log
   }
@@ -99,7 +103,7 @@ object Demo {
     scroll: Scroll,
     log: LogRing,
     logState: LogViewState,
-    pane: Pane,
+    focus: FocusRing[Pane],
     page: Selection,
     list: Selection,
     table: TableState,
@@ -123,7 +127,7 @@ object Demo {
         Scroll.none,
         LogRing.empty(PosInt(200)),
         LogViewState.following,
-        Pane.Body,
+        FocusRing.of(Pane.Body, Pane.Log),
         Selection.first,
         Selection.first,
         TableState.of(Selection.first),
@@ -133,7 +137,14 @@ object Demo {
   }
 
   /** The corrected states one frame hands back (the returned-state pattern captured out of the render closure). */
-  final private case class Corrections(scroll: Scroll, logState: LogViewState, page: Selection, list: Selection, table: TableState)
+  final private case class Corrections(
+    scroll: Scroll,
+    logState: LogViewState,
+    page: Selection,
+    list: Selection,
+    table: TableState,
+    focus: FocusRing[Pane],
+  )
 
   /** The tab strip's hit region. */
   val tabsRegion: RegionId = RegionId("tabs")
@@ -240,30 +251,24 @@ object Demo {
     Row.raw("─", "U+2500", "1", "box drawing, Ambiguous"),
   )
 
-  /** The pane rects of one frame. The layout laws guarantee one rect per constraint, so the fallback rows are unreachable. */
+  /** The pane rects of one frame. Built by the fixed-arity splits (decision D26), so no fallback exists. */
   final private case class PaneAreas(header: Rect, tabs: Rect, page: Rect, log: Option[Rect], footer: Rect)
 
   private def paneAreas(area: Rect, inline: Boolean): PaneAreas =
     if (inline) {
-      Layout.vertical(Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(3)).split(area) match {
-        case Vector(header, tabs, page, footer) => PaneAreas(header, tabs, page, none[Rect], footer)
-        case _ => PaneAreas(area, area, area, none[Rect], area)
-      }
+      val (header, tabs, page, footer) =
+        Axis.vertical.split4(area, Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(3))
+      PaneAreas(header, tabs, page, none[Rect], footer)
     } else {
-      Layout
-        .vertical(Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(6), Constraint.length(3))
-        .split(area) match {
-        case Vector(header, tabs, page, log, footer) => PaneAreas(header, tabs, page, log.some, footer)
-        case _ => PaneAreas(area, area, area, none[Rect], area)
-      }
+      val (header, tabs, page, log, footer) =
+        Axis
+          .vertical
+          .split5(area, Constraint.length(3), Constraint.length(1), Constraint.fill(1), Constraint.length(6), Constraint.length(3))
+      PaneAreas(header, tabs, page, log.some, footer)
     }
 
   /** A page area split into the widget's area and the one-column scrollbar lane beside it. */
-  private def withLane(area: Rect): (Rect, Rect) =
-    Layout.horizontal(Constraint.fill(1), Constraint.length(1)).split(area) match {
-      case Vector(body, lane) => (body, lane)
-      case _ => (area, area)
-    }
+  private def withLane(area: Rect): (Rect, Rect) = Axis.horizontal.split2(area, Constraint.fill(1), Constraint.length(1))
 
   private def isInline(terminal: Terminal): Boolean = terminal.options.screenMode match {
     case ScreenMode.AlternateScreen => false
@@ -303,9 +308,13 @@ object Demo {
     * the `Rendering.statefulWith` shape).
     */
   private def view(state: State, terminal: Terminal, corrections: AtomicReference[Corrections])(canvas: Canvas): Unit = {
-    val set   = borders(terminal)
-    val caps  = terminal.capabilities
-    val panes = paneAreas(canvas.area, isInline(terminal))
+    val set     = borders(terminal)
+    val caps    = terminal.capabilities
+    val panes   = paneAreas(canvas.area, isInline(terminal))
+    /* the focus ring is corrected to the panes actually drawn (inline mode has no log), the returned-state shape of 6.6 applied to
+     * focus: a one-item ring stays put under Tab */
+    val present = panes.log.fold(Vector(Pane.Body))(_ => Vector(Pane.Body, Pane.Log))
+    corrections.updateAndGet(_.copy(focus = state.focus.withItems(present))): Unit
     renderHeader(terminal, set, panes.header, canvas)
     renderTabs(state, caps, panes.tabs, canvas, corrections)
     Page.of(state.page) match {
@@ -419,31 +428,30 @@ object Demo {
     corrections.updateAndGet(_.copy(table = corrected)): Unit
   }
 
-  private def renderGaugePage(state: State, set: BorderSet, caps: Capabilities, area: Rect, canvas: Canvas): Unit =
-    Layout.vertical(Constraint.length(3), Constraint.length(3), Constraint.length(3), Constraint.fill(1)).split(area) match {
-      case Vector(first, second, third, _) =>
-        val listIndex = NonNegInts.clamp(math.min(state.list.selected.fold(0L)(_.value.toLong), ListCount.value.toLong - 1L))
-        Gauge
-          .fraction(state.gauge, GaugeTotal)
-          .withBlock(titled(set, " progress (+ / -) ", Color.Green))
-          .withGaugeStyle(Style.empty.withFg(Color.Green))
-          .withSetFor(caps)
-          .render(first, canvas)
-        Gauge
-          .fraction(listIndex, PosInt(29))
-          .withBlock(titled(set, " list position ", Color.Cyan))
-          .withGaugeStyle(Style.empty.withFg(Color.Cyan))
-          .withSetFor(caps)
-          .render(second, canvas)
-        Gauge
-          .percent(Percent(100))
-          .withLabel(Line.raw("done"))
-          .withBlock(titled(set, " done ", Color.Magenta))
-          .withGaugeStyle(Style.empty.withFg(Color.Magenta))
-          .withSetFor(caps)
-          .render(third, canvas)
-      case _ => ()
-    }
+  private def renderGaugePage(state: State, set: BorderSet, caps: Capabilities, area: Rect, canvas: Canvas): Unit = {
+    val (first, second, third, _) =
+      Axis.vertical.split4(area, Constraint.length(3), Constraint.length(3), Constraint.length(3), Constraint.fill(1))
+    val listIndex                 = NonNegInts.clamp(math.min(state.list.selected.fold(0L)(_.value.toLong), ListCount.value.toLong - 1L))
+    Gauge
+      .fraction(state.gauge, GaugeTotal)
+      .withBlock(titled(set, " progress (+ / -) ", Color.Green))
+      .withGaugeStyle(Style.empty.withFg(Color.Green))
+      .withSetFor(caps)
+      .render(first, canvas)
+    Gauge
+      .fraction(listIndex, PosInt(29))
+      .withBlock(titled(set, " list position ", Color.Cyan))
+      .withGaugeStyle(Style.empty.withFg(Color.Cyan))
+      .withSetFor(caps)
+      .render(second, canvas)
+    Gauge
+      .percent(Percent(100))
+      .withLabel(Line.raw("done"))
+      .withBlock(titled(set, " done ", Color.Magenta))
+      .withGaugeStyle(Style.empty.withFg(Color.Magenta))
+      .withSetFor(caps)
+      .render(third, canvas)
+  }
 
   private def renderLog(
     state: State,
@@ -471,7 +479,7 @@ object Demo {
     val row   = s"${state.table.rows.selected.fold("-")(_.value.toString)} col ${state.table.column.fold("-")(_.value.toString)}"
     val line  = Line.of(
       Span.styled("pane ", Style.empty.dim),
-      Span.raw(paneName(state.pane)),
+      Span.raw(paneName(focusedPane(state))),
       Span.styled("  page ", Style.empty.dim),
       Span.raw(state.page.selected.fold("-")(_.value.toString)),
       Span.styled("  scroll ", Style.empty.dim),
@@ -526,10 +534,8 @@ object Demo {
     case Pane.Log => false
   }
 
-  private def togglePane(pane: Pane): Pane = pane match {
-    case Pane.Body => Pane.Log
-    case Pane.Log => Pane.Body
-  }
+  /** The pane the key focus is on: the current target of the ring, the page when nothing is focused. */
+  private def focusedPane(state: State): Pane = state.focus.current.getOrElse(Pane.Body)
 
   /** The gauge moved by `delta` twentieths, clamped into 0..20. */
   private def gaugeBy(state: State, delta: Int): State =
@@ -547,7 +553,7 @@ object Demo {
   /** The focused pane moved by `delta` (negative is up): the log, the scroll offset, the list or row selection, or the gauge; the
     * render clamps.
     */
-  private def moveFocused(terminal: Terminal, state: State, delta: Int): State = state.pane match {
+  private def moveFocused(terminal: Terminal, state: State, delta: Int): State = focusedPane(state) match {
     case Pane.Log => logBy(terminal, state, delta)
     case Pane.Body =>
       Page.of(state.page) match {
@@ -558,12 +564,12 @@ object Demo {
       }
   }
 
-  private def pageStep(terminal: Terminal, state: State): Int = state.pane match {
+  private def pageStep(terminal: Terminal, state: State): Int = focusedPane(state) match {
     case Pane.Body => pageRows(terminal)
     case Pane.Log => math.max(1, logRows(terminal).value)
   }
 
-  private def toTopFocused(state: State): State = state.pane match {
+  private def toTopFocused(state: State): State = focusedPane(state) match {
     case Pane.Log => state.copy(logState = LogView.toTop(state.log))
     case Pane.Body =>
       Page.of(state.page) match {
@@ -574,7 +580,7 @@ object Demo {
       }
   }
 
-  private def toBottomFocused(state: State): State = state.pane match {
+  private def toBottomFocused(state: State): State = focusedPane(state) match {
     case Pane.Log => state.copy(logState = LogView.toBottom)
     case Pane.Body =>
       Page.of(state.page) match {
@@ -588,7 +594,7 @@ object Demo {
   /** Left and Right move the table's column on the table page and the page selection elsewhere. */
   private def sideways(state: State, delta: Int): State =
     Page.of(state.page) match {
-      case Page.TablePage if isBody(state.pane) =>
+      case Page.TablePage if isBody(focusedPane(state)) =>
         state.copy(table = if (delta < 0) state.table.selectPreviousColumn else state.table.selectNextColumn)
       case Page.ScrollPage | Page.ListPage | Page.TablePage | Page.GaugePage =>
         state.copy(page = if (delta < 0) state.page.selectPrevious else state.page.selectNext)
@@ -664,7 +670,7 @@ object Demo {
     case Event.Key(KeyEvent(KeyCode.Char(c), _, _)) if isDigitPage(c) =>
       state.copy(page = state.page.select(NonNegInts.clamp((c - '1').toLong).some))
     case Event.Key(KeyEvent(KeyCode.Tab, _, _)) =>
-      if (isInline(terminal)) state else state.copy(pane = togglePane(state.pane))
+      state.copy(focus = state.focus.next)
     case Event.Key(KeyEvent(KeyCode.Left, _, _)) => sideways(state, -1)
     case Event.Key(KeyEvent(KeyCode.Right, _, _)) => sideways(state, 1)
     case Event.Key(KeyEvent(KeyCode.Up, _, _)) => moveFocused(terminal, state, -1)
@@ -688,7 +694,7 @@ object Demo {
     * on the JVM and Native and the subscription driver on Node, so the two cannot drift.
     */
   def drawFrame(terminal: Terminal, state: State): (State, CompletedFrame) = {
-    val corrections = new AtomicReference(Corrections(state.scroll, state.logState, state.page, state.list, state.table))
+    val corrections = new AtomicReference(Corrections(state.scroll, state.logState, state.page, state.list, state.table, state.focus))
     val completed   = terminal.draw(view(state, terminal, corrections))
     val c           = corrections.get()
     val next        =
@@ -700,6 +706,7 @@ object Demo {
         page = c.page,
         list = c.list,
         table = c.table,
+        focus = c.focus,
       )
     (next, completed)
   }
