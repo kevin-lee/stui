@@ -4,8 +4,9 @@ import cats.syntax.all.*
 import hedgehog.{Gen, Range, Result}
 import hedgehog.runner.*
 import stui.core.geometry.{Rect, Size}
-import stui.core.layout.{Constraint, Direction, Layout, Spacing}
+import stui.core.layout.{Axis, Constraint, Direction, Layout, Spacing}
 import stui.testkit.Assertions
+import stui.core.layout.Axis.*
 import stui.testkit.gen.{GeometryGens, LayoutGens}
 
 /** The layout laws of design doc 9.2: count, containment, cross axis, order, bounded overlap, Fill sums and balance, equal-weight
@@ -177,5 +178,58 @@ object LayoutLaws {
       },
     ),
   )
+
+  /** The fixed-arity forms of [[Axis]] agree with [[Layout.split]] over the same inputs (design doc 9.2, decision D26). */
+  def fixedArityLaws(name: String, areas: Gen[Rect], axes: Gen[Axis], constraints: Gen[Constraint]): List[Test] = {
+    def agree(arity: Int, tuple: (Rect, Axis, Vector[Constraint]) => Vector[Rect]): Test =
+      property(
+        s"[$name] split${arity.toString} agrees with split",
+        for {
+          area <- areas.forAll
+          axis <- axes.forAll
+          cs   <- constraints.list(Range.singleton(arity)).map(_.toVector).forAll
+        } yield Assertions.eqv(tuple(area, axis, cs), axis.layout(cs).split(area)),
+      )
+    List(
+      agree(
+        2,
+        (area, axis, cs) => {
+          val (a, b) = axis.split2(area, at(cs, 0), at(cs, 1))
+          Vector(a, b)
+        },
+      ),
+      agree(
+        3,
+        (area, axis, cs) => {
+          val (a, b, c) = axis.split3(area, at(cs, 0), at(cs, 1), at(cs, 2))
+          Vector(a, b, c)
+        },
+      ),
+      agree(
+        4,
+        (area, axis, cs) => {
+          val (a, b, c, d) = axis.split4(area, at(cs, 0), at(cs, 1), at(cs, 2), at(cs, 3))
+          Vector(a, b, c, d)
+        },
+      ),
+      agree(
+        5,
+        (area, axis, cs) => {
+          val (a, b, c, d, e) = axis.split5(area, at(cs, 0), at(cs, 1), at(cs, 2), at(cs, 3), at(cs, 4))
+          Vector(a, b, c, d, e)
+        },
+      ),
+      agree(
+        6,
+        (area, axis, cs) => {
+          val (a, b, c, d, e, f) = axis.split6(area, at(cs, 0), at(cs, 1), at(cs, 2), at(cs, 3), at(cs, 4), at(cs, 5))
+          Vector(a, b, c, d, e, f)
+        },
+      ),
+    )
+  }
+
+  /** The constraint at the index, `Fill(1)` when the generated vector is shorter (it never is: the range is a singleton). */
+  private def at(cs: Vector[Constraint], i: Int): Constraint = cs.lift(i).getOrElse(Constraint.fill(1))
 
 }

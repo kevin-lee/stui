@@ -108,6 +108,8 @@ object LayoutFixturesSpec extends Properties {
     example("20: no constraints give no rects", Assertions.eqv(Layout.horizontal().split(area), Vector.empty[Rect])),
     example("21: a single fill takes the whole area", Assertions.eqv(Layout.horizontal(Constraint.fill(1)).split(area), Vector(r(0, 80)))),
     example("22: a zero-width area gives empty segments", testZeroWidth),
+    example("23: split3 with three lengths equals fixture 1 as a tuple", testSplit3),
+    example("24: split2 with a gap and a trailing fill", testSplit2Gap),
   )
 
   def testVerticalDual: Result = {
@@ -127,5 +129,17 @@ object LayoutFixturesSpec extends Properties {
       Vector(z(0, 0), z(0, 0)),
     )
   }
+
+  def testSplit3: Result =
+    Assertions.eqv(
+      Axis.horizontal.split3(area, Constraint.length(20), Constraint.length(20), Constraint.length(20)),
+      (r(0, 20), r(20, 20), r(40, 20)),
+    )
+
+  def testSplit2Gap: Result =
+    Assertions.eqv(
+      Axis.horizontal.withSpacing(Spacing.space(2)).split2(area, Constraint.length(10), Constraint.fill(1)),
+      (r(0, 10), r(12, 68)),
+    )
 
 }

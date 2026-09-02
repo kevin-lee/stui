@@ -1,7 +1,7 @@
 package stui.core.spi
 
 /** A monotonic time source for render statistics and timeouts (design doc 7.1 and 8.1): never wall-clock time, so a deterministic clock
-  * can drive tests. The M3 Scheduler extends it.
+  * can drive tests. [[Scheduler]] extends it (M3a).
   *
   * @author Kevin Lee
   * @since 2026-08-29

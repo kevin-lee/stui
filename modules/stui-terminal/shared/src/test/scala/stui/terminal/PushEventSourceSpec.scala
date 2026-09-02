@@ -8,31 +8,25 @@ import stui.core.event.{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers}
 import stui.core.geometry.Size
 import stui.core.internal.NonNegInts
 import stui.terminal.decoder.DecoderState
-import stui.testkit.Assertions
+import stui.testkit.{Assertions, ManualScheduler}
+import stui.testkit.ManualScheduler.*
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration.*
 
 /** The push-based event source (design doc 6.3 and 7.5): delivery order, the buffered pre-subscription events, the scheduled ESC
-  * timeout ticks, the resize deduplication with the D12 effective size, and shutdown. The scheduler is a manual recorder, so the
-  * tick timing is deterministic.
+  * timeout ticks, the resize deduplication with the D12 effective size, and shutdown. The scheduler is testkit's `ManualScheduler`,
+  * so the tick timing is deterministic.
   *
   * @author Kevin Lee
   * @since 2026-08-31
   */
 object PushEventSourceSpec extends Properties {
 
-  /** One recorded schedule call: the delay, the action, and whether the cancel was invoked. */
-  final private case class Scheduled(delay: FiniteDuration, action: () => Unit, cancelled: AtomicReference[Boolean])
-
-  final private class ManualSchedule {
-    val calls: AtomicReference[Vector[Scheduled]] = new AtomicReference(Vector.empty[Scheduled])
-
-    val schedule: PushEventSource.Schedule = (delay, action) => {
-      val cancelled = new AtomicReference(false)
-      calls.updateAndGet(_ :+ Scheduled(delay, action, cancelled)): Unit
-      () => cancelled.set(true)
-    }
+  /** The source's schedule function over the deterministic scheduler: the cancel action cancels the tick's handle. */
+  private def scheduleOf(scheduler: ManualScheduler): PushEventSource.Schedule = (delay, action) => {
+    val handle = scheduler.schedule(delay, action)
+    () => handle.cancel()
   }
 
   private val timeout: FiniteDuration = 50.millis
@@ -80,44 +74,45 @@ object PushEventSourceSpec extends Properties {
   )
 
   def testPrintable: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val seen      = recording(events)
     events.onChunk(chunk("ab"))
+    val armed     = scheduler.pending
+    scheduler.advance(timeout)
     Result.all(
       List(
+        Assertions.eqv(armed, Vector.empty[FiniteDuration]),
         Assertions.eqv(seen.get(), Vector(char('a'), char('b'))),
-        Assertions.eqv(manual.calls.get().size, 0),
       )
     )
   }
 
   def testBufferedChunk: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
     events.onChunk(chunk("x"))
-    val seen   = recording(events)
+    val seen      = recording(events)
     Assertions.eqv(seen.get(), Vector(char('x')))
   }
 
   def testInitialEvents: Result = {
-    val manual = new ManualSchedule
-    val events = sourceWith(manual.schedule, identity, Vector(char('k')), none[Size])
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = sourceWith(scheduleOf(scheduler), identity, Vector(char('k')), none[Size])
+    val seen      = recording(events)
     Assertions.eqv(seen.get(), Vector(char('k')))
   }
 
   def testEscTick: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val seen      = recording(events)
     events.onChunk(escChunk)
-    val armed  = manual.calls.get()
-    armed.foreach(call => call.action())
+    val armed     = scheduler.pending
+    scheduler.advance(timeout)
     Result.all(
       List(
-        Assertions.eqv(armed.size, 1),
-        Assertions.eqv(armed.map(_.delay), Vector(timeout)),
+        Assertions.eqv(armed, Vector(timeout)),
         Assertions.eqv(
           seen.get(),
           Vector(Event.key(KeyEvent(KeyCode.Escape, KeyModifiers.empty, KeyEventKind.Press))),
@@ -127,24 +122,26 @@ object PushEventSourceSpec extends Properties {
   }
 
   def testTickCancelled: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val seen      = recording(events)
     events.onChunk(escChunk)
     events.onChunk(chunk("[A"))
+    val armed     = scheduler.pending
+    scheduler.advance(timeout)
     Result.all(
       List(
-        Assertions.eqv(manual.calls.get().map(_.cancelled.get()), Vector(true)),
+        Assertions.eqv(armed, Vector.empty[FiniteDuration]),
         Assertions.eqv(seen.get(), Vector(Event.key(KeyEvent(KeyCode.Up, KeyModifiers.empty, KeyEventKind.Press)))),
       )
     )
   }
 
   def testResize: Result = {
-    val manual   = new ManualSchedule
-    val clampTo9 = (size: Size) => Size(size.width, NonNegInts.min(NonNegInt(9), size.height))
-    val events   = sourceWith(manual.schedule, clampTo9, Vector.empty[Event], Size(NonNegInt(80), NonNegInt(24)).some)
-    val seen     = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val clampTo9  = (size: Size) => Size(size.width, NonNegInts.min(NonNegInt(9), size.height))
+    val events    = sourceWith(scheduleOf(scheduler), clampTo9, Vector.empty[Event], Size(NonNegInt(80), NonNegInt(24)).some)
+    val seen      = recording(events)
     events.onResize(Size(NonNegInt(80), NonNegInt(24)).some)
     events.onResize(Size(NonNegInt(90), NonNegInt(30)).some)
     events.onResize(Size(NonNegInt(90), NonNegInt(30)).some)
@@ -152,20 +149,20 @@ object PushEventSourceSpec extends Properties {
   }
 
   def testResizeNoise: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val seen      = recording(events)
     events.onResize(none[Size])
     events.onResize(Size(NonNegInt(0), NonNegInt(24)).some)
     Assertions.eqv(seen.get(), Vector.empty[Event])
   }
 
   def testUnsubscribe: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val first  = new AtomicReference(Vector.empty[Event])
-    val second = new AtomicReference(Vector.empty[Event])
-    val handle = events.subscribe(event => first.updateAndGet(_ :+ event): Unit)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val first     = new AtomicReference(Vector.empty[Event])
+    val second    = new AtomicReference(Vector.empty[Event])
+    val handle    = events.subscribe(event => first.updateAndGet(_ :+ event): Unit)
     events.subscribe(event => second.updateAndGet(_ :+ event): Unit): Unit
     events.onChunk(chunk("a"))
     handle.cancel()
@@ -179,15 +176,17 @@ object PushEventSourceSpec extends Properties {
   }
 
   def testShutdown: Result = {
-    val manual = new ManualSchedule
-    val events = source(manual.schedule)
-    val seen   = recording(events)
+    val scheduler = ManualScheduler.of(0.millis)
+    val events    = source(scheduleOf(scheduler))
+    val seen      = recording(events)
     events.onChunk(escChunk)
     events.shutdown()
+    val armed     = scheduler.pending
+    scheduler.advance(timeout)
     events.onChunk(chunk("q"))
     Result.all(
       List(
-        Assertions.eqv(manual.calls.get().map(_.cancelled.get()), Vector(true)),
+        Assertions.eqv(armed, Vector.empty[FiniteDuration]),
         Assertions.eqv(seen.get(), Vector.empty[Event]),
       )
     )
