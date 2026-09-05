@@ -2,6 +2,7 @@ package stui.app
 
 import stui.app.internal.{BlockingDriver, QueueScheduler}
 import stui.core.capability.CapabilitiesPatch
+import stui.core.frame.Frame
 import stui.core.spi.{Clock, TerminalError, TerminalOptions}
 import stui.terminal.{PlatformTerminal, TerminalSession}
 import stui.terminal.TerminalSession.*
@@ -51,6 +52,7 @@ object Stui {
       QueueScheduler.unwoken(Clock.system),
       () => session.terminationRequested,
       PollCap,
+      (_: Frame) => (),
     )
 
 }

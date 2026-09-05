@@ -5,7 +5,7 @@ import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.{Buffer, Canvas, Cell}
 import stui.core.capability.Capabilities
 import stui.core.frame.Frame
-import stui.core.geometry.Rect
+import stui.core.geometry.{Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.spi.{Clock, PrintEffect, ScreenMode, TerminalBackend, TerminalError, TerminalOptions}
 import stui.core.widget.Widget
@@ -83,14 +83,17 @@ object Terminal {
         )
       )
 
-  /** The widget rendered over the full terminal size with the trailing all-blank rows trimmed (design doc 7.2). */
-  private def renderPrint(terminal: Terminal, widget: Widget): Buffer = {
-    val full = Buffer
-      .emptyWith(terminal.policy, Rect.sized(terminal.backend.size()))
-      .draw(canvas => widget.render(canvas.area, canvas))
+  /** The widget rendered over a screen of the size with the trailing all-blank rows trimmed (design doc 7.2), the print form every
+    * terminal and the simulator share (M3c).
+    */
+  private[stui] def printRows(policy: WidthPolicy, size: Size, widget: Widget): Buffer = {
+    val full = Buffer.emptyWith(policy, Rect.sized(size)).draw(canvas => widget.render(canvas.area, canvas))
     val keep = full.rows.lastIndexWhere(row => row.exists(cell => cell =!= Cell.blank)) + 1
     full.firstRows(NonNegInts.clamp(keep.toLong))
   }
+
+  /** The widget rendered over the full terminal size with the trailing all-blank rows trimmed (design doc 7.2). */
+  private def renderPrint(terminal: Terminal, widget: Widget): Buffer = printRows(terminal.policy, terminal.backend.size(), widget)
 
   private def locked[A](terminal: Terminal)(body: => A): A = {
     terminal.lock.lock()

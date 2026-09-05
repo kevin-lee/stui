@@ -6,6 +6,7 @@ import stui.app.internal.Inbox.*
 import stui.app.internal.Loop.Input
 import stui.app.internal.Tasks.*
 import stui.app.internal.Ticks.*
+import stui.core.frame.Frame
 import stui.core.spi.{EventSource, Scheduler, Subscription}
 import stui.core.terminal.Terminal
 
@@ -15,9 +16,10 @@ import scala.concurrent.duration.Duration
 /** The callback ignition (design doc 6.3 and 10, M3b), Node's and any push source's: every listener call posts into the inbox and
   * arms one zero-delay flush tick through the scheduler if none is armed, and the flush drains the inbox into one batch, steps,
   * applies the effects, and presents once - so Node batches like the blocking driver does and the D20 laws hold there. Under
-  * `ManualScheduler` a test drives the flush with `advance(Duration.Zero)`, which makes this driver testable on every platform. An
-  * exception from the application escapes the flush, that is the scheduler's callback, which on Node is the uncaught path the exit
-  * hook restores from.
+  * `ManualScheduler` a test drives the flush with `advance(Duration.Zero)`, which makes this driver testable on every platform. The
+  * batch folds its terminal events before its posted messages (the order rule of design doc 10, M3c) and `onPresent` receives every
+  * presented frame, the equivalence law's observation (`_ => ()` in production). An exception from the application escapes the
+  * flush, that is the scheduler's callback, which on Node is the uncaught path the exit hook restores from.
   *
   * @author Kevin Lee
   * @since 2026-09-05
@@ -33,6 +35,7 @@ private[stui] object CallbackDriver {
     terminal: Terminal,
     events: EventSource,
     scheduler: Scheduler,
+    onPresent: Frame => Unit,
     onExit: Model => Unit,
   ): Unit = {
     val ended        = new AtomicBoolean(false)
@@ -60,13 +63,14 @@ private[stui] object CallbackDriver {
       if (ended.get()) {
         ()
       } else {
-        val batch = inbox.drain()
+        val batch = Loop.eventsFirst(inbox.drain())
         if (batch.isEmpty) {
           ()
         } else {
-          val stepped   = Loop.step(app, Effects.regions(terminal), current.get(), batch)
+          val stepped            = Loop.step(app, Effects.regions(terminal), current.get(), batch)
           Effects.apply(terminal, ticks, tasks, stepped)
-          val presented = Effects.present(terminal, app, stepped.model)
+          val (presented, frame) = Effects.present(terminal, app, stepped.model)
+          onPresent(frame)
           current.set(presented)
           if (stepped.exit) finish(presented) else ()
         }
@@ -82,7 +86,8 @@ private[stui] object CallbackDriver {
     }
 
     Effects.apply(terminal, ticks, tasks, first)
-    val presented = Effects.present(terminal, app, first.model)
+    val (presented, frame) = Effects.present(terminal, app, first.model)
+    onPresent(frame)
     current.set(presented)
     if (first.exit) finish(presented) else subscription.set(events.subscribe(event => post(Input.Received(event))).some)
   }

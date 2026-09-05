@@ -66,12 +66,12 @@ jobs:
           - native
         include:
           - platform: jvm
-            tasks: unicodeJVM/test coreJVM/test testkitJVM/test widgetsJVM/test terminalJVM/test appJVM/test examplesJVM/compile
+            tasks: unicodeJVM/test coreJVM/test testkitJVM/test widgetsJVM/test terminalJVM/test appJVM/test examplesJVM/test
           - platform: js
-            tasks: unicodeJS/test coreJS/test testkitJS/test widgetsJS/test terminalJS/test appJS/test examplesJS/fastLinkJS
+            tasks: unicodeJS/test coreJS/test testkitJS/test widgetsJS/test terminalJS/test appJS/test examplesJS/test examplesJS/fastLinkJS
           # The `set` must precede the test tasks (sbt runs its command line in order).
           - platform: native
-            tasks: '"set every Test / parallelExecution := false" unicodeNative/test coreNative/test testkitNative/test widgetsNative/test terminalNative/test appNative/test examplesNative/nativeLink'
+            tasks: '"set every Test / parallelExecution := false" unicodeNative/test coreNative/test testkitNative/test widgetsNative/test terminalNative/test appNative/test examplesNative/test examplesNative/nativeLink'
 
     runs-on: ${{ matrix.os }}
 

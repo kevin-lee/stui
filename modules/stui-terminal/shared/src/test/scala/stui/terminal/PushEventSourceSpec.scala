@@ -23,12 +23,6 @@ import scala.concurrent.duration.*
   */
 object PushEventSourceSpec extends Properties {
 
-  /** The source's schedule function over the deterministic scheduler: the cancel action cancels the tick's handle. */
-  private def scheduleOf(scheduler: ManualScheduler): PushEventSource.Schedule = (delay, action) => {
-    val handle = scheduler.schedule(delay, action)
-    () => handle.cancel()
-  }
-
   private val timeout: FiniteDuration = 50.millis
 
   private def sourceWith(
@@ -75,7 +69,7 @@ object PushEventSourceSpec extends Properties {
 
   def testPrintable: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val seen      = recording(events)
     events.onChunk(chunk("ab"))
     val armed     = scheduler.pending
@@ -90,7 +84,7 @@ object PushEventSourceSpec extends Properties {
 
   def testBufferedChunk: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     events.onChunk(chunk("x"))
     val seen      = recording(events)
     Assertions.eqv(seen.get(), Vector(char('x')))
@@ -98,14 +92,14 @@ object PushEventSourceSpec extends Properties {
 
   def testInitialEvents: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = sourceWith(scheduleOf(scheduler), identity, Vector(char('k')), none[Size])
+    val events    = sourceWith(Schedules.of(scheduler), identity, Vector(char('k')), none[Size])
     val seen      = recording(events)
     Assertions.eqv(seen.get(), Vector(char('k')))
   }
 
   def testEscTick: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val seen      = recording(events)
     events.onChunk(escChunk)
     val armed     = scheduler.pending
@@ -123,7 +117,7 @@ object PushEventSourceSpec extends Properties {
 
   def testTickCancelled: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val seen      = recording(events)
     events.onChunk(escChunk)
     events.onChunk(chunk("[A"))
@@ -140,7 +134,7 @@ object PushEventSourceSpec extends Properties {
   def testResize: Result = {
     val scheduler = ManualScheduler.of(0.millis)
     val clampTo9  = (size: Size) => Size(size.width, NonNegInts.min(NonNegInt(9), size.height))
-    val events    = sourceWith(scheduleOf(scheduler), clampTo9, Vector.empty[Event], Size(NonNegInt(80), NonNegInt(24)).some)
+    val events    = sourceWith(Schedules.of(scheduler), clampTo9, Vector.empty[Event], Size(NonNegInt(80), NonNegInt(24)).some)
     val seen      = recording(events)
     events.onResize(Size(NonNegInt(80), NonNegInt(24)).some)
     events.onResize(Size(NonNegInt(90), NonNegInt(30)).some)
@@ -150,7 +144,7 @@ object PushEventSourceSpec extends Properties {
 
   def testResizeNoise: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val seen      = recording(events)
     events.onResize(none[Size])
     events.onResize(Size(NonNegInt(0), NonNegInt(24)).some)
@@ -159,7 +153,7 @@ object PushEventSourceSpec extends Properties {
 
   def testUnsubscribe: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val first     = new AtomicReference(Vector.empty[Event])
     val second    = new AtomicReference(Vector.empty[Event])
     val handle    = events.subscribe(event => first.updateAndGet(_ :+ event): Unit)
@@ -177,7 +171,7 @@ object PushEventSourceSpec extends Properties {
 
   def testShutdown: Result = {
     val scheduler = ManualScheduler.of(0.millis)
-    val events    = source(scheduleOf(scheduler))
+    val events    = source(Schedules.of(scheduler))
     val seen      = recording(events)
     events.onChunk(escChunk)
     events.shutdown()

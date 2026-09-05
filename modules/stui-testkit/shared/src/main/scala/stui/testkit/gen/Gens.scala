@@ -2,6 +2,8 @@ package stui.testkit.gen
 
 import hedgehog.{Gen, Range}
 
+import scala.concurrent.duration.*
+
 /** Generators that depend on no stui type. The stui-aware generators live beside them in this package (geometry, style, text,
   * buffer, event, and layout).
   *
@@ -18,5 +20,8 @@ object Gens {
 
   /** Valid scalar values only (no surrogates). The nasty-Unicode corpus generator is a stui-unicode deliverable. */
   def unicodeString(range: Range[Int]): Gen[String] = Gen.string(Gen.unicode, range)
+
+  /** Durations in whole milliseconds. */
+  def millis(range: Range[Int]): Gen[FiniteDuration] = Gen.int(range).map(_.millis)
 
 }

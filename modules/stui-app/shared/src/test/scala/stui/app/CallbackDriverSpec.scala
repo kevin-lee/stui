@@ -8,20 +8,19 @@ import stui.app.internal.CallbackDriver
 import stui.core.capability.Capabilities
 import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind}
 import stui.core.geometry.{Position, Size}
-import stui.core.spi.{EventSource, ScreenMode, Subscription, TerminalError, TerminalOptions}
+import stui.core.frame.Frame
+import stui.core.spi.{ScreenMode, TerminalError, TerminalOptions}
 import stui.core.terminal.Terminal
 import stui.testkit.{Assertions, BackendCall, ManualScheduler, TestBackend}
-import stui.testkit.ManualScheduler.*
 import stui.testkit.TestBackend.*
-import stui.unicode.internal.IntOps.*
 
-import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration.*
 import scala.util.Try
 
 /** The callback driver over the in-memory backend, a push source fake, and the deterministic scheduler (design doc 10 and 12, M3b):
   * the first present, one present per batch, the last resize, prints before the draw, exit, ticks, tasks, the render correction, mouse
-  * routing, and the restore path.
+  * routing, the batch order rule, and the restore path.
   *
   * @author Kevin Lee
   * @since 2026-09-05
@@ -33,19 +32,6 @@ object CallbackDriverSpec extends Properties {
   private inline def at(inline x: Int, inline y: Int): Position = Position(NonNegInt(x), NonNegInt(y))
 
   private val env: AppEnv = AppEnv(Capabilities.conservative, ScreenMode.AlternateScreen, sized(20, 5))
-
-  /** A push source the test feeds by hand. */
-  final class FakePushSource extends EventSource {
-    private val listeners: AtomicReference[Vector[(Int, Event => Unit)]] = new AtomicReference(Vector.empty[(Int, Event => Unit)])
-    private val ids: AtomicInteger                                       = new AtomicInteger(0)
-    override def subscribe(listener: Event => Unit): Subscription        = {
-      val id = ids.getAndIncrement()
-      listeners.updateAndGet(_ :+ (id -> listener)): Unit
-      () => listeners.updateAndGet(_.filterNot { case (listenerId, _) => listenerId === id }): Unit
-    }
-    def emit(event: Event): Unit                                         = listeners.get().foreach { case (_, listener) => listener(event) }
-    def listenerCount: Int                                               = listeners.get().size
-  }
 
   final private case class Harness(
     backend: TestBackend,
@@ -79,7 +65,15 @@ object CallbackDriverSpec extends Properties {
   /** [[withDriver]] under the given options (inline mode makes a print reach the backend at once, design doc 7.2). */
   private def withDriverIn[A](options: TerminalOptions, h: Harness)(body: => A): Either[TerminalError, A] =
     Terminal.run(h.backend, options, Capabilities.conservative, h.scheduler) { terminal =>
-      CallbackDriver.start(CounterApp.of(h.deferred, none[Int]), env, terminal, h.source, h.scheduler, model => h.exited.set(model.some))
+      CallbackDriver.start(
+        CounterApp.of(h.deferred, none[Int]),
+        env,
+        terminal,
+        h.source,
+        h.scheduler,
+        (_: Frame) => (),
+        model => h.exited.set(model.some),
+      )
       body
     }
 
@@ -100,6 +94,7 @@ object CallbackDriverSpec extends Properties {
     example("a tick subscription fires and presents", testTicks),
     example("a synchronous task posts its result into the next batch", testSyncTask),
     example("a deferred task posts when it completes", testDeferredTask),
+    example("a batch folds its events before its posted messages", testOrder),
     example("the render correction reaches the model", testCorrection),
     example("a mouse event is routed with the last frame's regions", testMouse),
     example("an exception from update propagates from the flush after the restore", testCrash),
@@ -218,6 +213,20 @@ object CallbackDriverSpec extends Properties {
       h.deferred.get().foreach(callback => callback(5.asRight[Throwable]))
       flush(h)
       Result.all(List(Assertions.eqv(captured, true), Assertions.eqv(quit(h).map(_.count), 5.some)))
+    }.getOrElse(Result.failure.log("the terminal did not open"))
+  }
+
+  def testOrder: Result = {
+    val h = harness()
+    withDriver(h) {
+      h.source.emit(key('+'))
+      flush(h)
+      h.source.emit(key('m'))
+      flush(h)
+      h.deferred.get().foreach(callback => callback(3.asRight[Throwable]))
+      h.source.emit(key('+'))
+      flush(h)
+      Assertions.eqv(quit(h).map(_.count), 6.some)
     }.getOrElse(Result.failure.log("the terminal did not open"))
   }
 

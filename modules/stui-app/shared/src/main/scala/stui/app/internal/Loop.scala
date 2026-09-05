@@ -48,6 +48,17 @@ private[stui] object Loop {
     exit: Boolean,
   )
 
+  /** The batch order rule (design doc 10, M3c): the terminal events in arrival order, then the posted messages (tick and task
+    * results) in arrival order, the same in every driver and in the simulator, so the fold of a batch does not depend on the ignition.
+    */
+  def eventsFirst[Msg](inputs: Vector[Input[Msg]]): Vector[Input[Msg]] = {
+    val (events, messages) = inputs.partition {
+      case Input.Received(_) => true
+      case Input.Message(_) => false
+    }
+    events ++ messages
+  }
+
   /** `init` and its command run to the fixed point. */
   def start[Model, Msg](app: StuiApp[Model, Msg], env: AppEnv): Stepped[Model, Msg] = {
     val (model, cmd)   = app.init(env)

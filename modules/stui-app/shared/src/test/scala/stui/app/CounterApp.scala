@@ -51,12 +51,15 @@ enum CounterMsg derives Eq, Show, Hash {
   case Hit(over: Option[RegionId])
   case FocusNext
   case Move(target: Option[Int])
+  case Scale(n: Int)
+  case LaterScale
 }
 
 /** The test application shared by the loop and driver specs (design doc 10, M3b): `+` counts, `q` exits, `p` prints, `r` redraws,
   * `t` toggles a 10 ms tick, `!` throws, `e` emits two increments, `s` runs a task that completes at once, `d` runs a task whose
-  * callback the test captures, Tab moves the focus ring, Down records the ring's current target, a resize records the size, a mouse
-  * event records the region under it, and the root's render clamps the count at [[CounterApp.maxCount]] (the correction the
+  * callback the test captures, `m` runs a deferred task whose result scales the count (the one message that does not commute with
+  * `+`, for the order rule of M3c), Tab moves the focus ring, Down records the ring's current target, a resize records the size, a
+  * mouse event records the region under it, and the root's render clamps the count at [[CounterApp.maxCount]] (the correction the
   * fixed-point contract allows).
   *
   * @author Kevin Lee
@@ -107,6 +110,7 @@ object CounterApp {
         case Event.Key(KeyEvent(KeyCode.Char('e'), _, _)) => CounterMsg.EmitTwice.some
         case Event.Key(KeyEvent(KeyCode.Char('s'), _, _)) => CounterMsg.AddTen.some
         case Event.Key(KeyEvent(KeyCode.Char('d'), _, _)) => CounterMsg.Later.some
+        case Event.Key(KeyEvent(KeyCode.Char('m'), _, _)) => CounterMsg.LaterScale.some
         case Event.Key(KeyEvent(KeyCode.Tab, _, _)) => CounterMsg.FocusNext.some
         case Event.Key(KeyEvent(KeyCode.Down, _, _)) => CounterMsg.Move(model.focus.current).some
         case Event.Resize(size) => CounterMsg.Resized(size).some
@@ -145,6 +149,15 @@ object CounterApp {
               () => deferred.set(none[Either[Throwable, Int] => Unit])
             }(result => CounterMsg.Add(result.getOrElse(0))),
           )
+        case CounterMsg.LaterScale =>
+          (
+            model,
+            Cmd.task[Int, CounterMsg] { callback =>
+              deferred.set(callback.some)
+              () => deferred.set(none[Either[Throwable, Int] => Unit])
+            }(result => CounterMsg.Scale(result.getOrElse(1))),
+          )
+        case CounterMsg.Scale(n) => (model.copy(count = model.count * n), Cmd.none)
         case CounterMsg.Hit(over) => (model.copy(over = over), Cmd.none)
         case CounterMsg.FocusNext => (model.copy(focus = model.focus.next), Cmd.none)
         case CounterMsg.Move(target) => (model.copy(moved = model.moved :+ target), Cmd.none)

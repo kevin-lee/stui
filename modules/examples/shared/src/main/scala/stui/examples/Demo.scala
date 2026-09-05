@@ -73,7 +73,7 @@ import scala.concurrent.duration.*
 object Demo {
 
   /** Which pane the key focus can be on: the page or the log. */
-  enum Pane derives Eq {
+  enum Pane derives Eq, Show, Hash {
     case Body
     case Log
   }
@@ -116,7 +116,9 @@ object Demo {
     table: TableState,
     gauge: NonNegInt,
     exit: Option[String],
-  )
+  ) derives Eq,
+        Show,
+        Hash
 
   object State {
 
