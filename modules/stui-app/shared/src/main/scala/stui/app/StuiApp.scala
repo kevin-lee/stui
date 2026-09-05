@@ -9,9 +9,10 @@ import scala.annotation.unused
   * a subscription value, and never touches a terminal. The runtime rules: `update` and `view` never throw (an escaping exception ends
   * the program through the restore path and is rethrown after it, there is no error hook); the loop drains everything pending into
   * one batch, folds each input in order - the message derived from the model the previous input's updates produced, then `update` to
-  * the fixed point of the emitted messages - and presents once (the last `Resize` wins, a slow flush skips intermediates); mouse
-  * events reach [[onMouse]] with the last presented frame's hit map and every other event reaches [[onEvent]]; the model `view`'s
-  * root returns from its render is the one the next batch starts from; the first present happens before the first wait.
+  * the fixed point of the emitted messages - and presents once (the last `Resize` wins, a slow flush skips intermediates); a batch
+  * folds its terminal events before its posted messages, each kind in arrival order, on every driver and in the simulator (M3c);
+  * mouse events reach [[onMouse]] with the last presented frame's hit map and every other event reaches [[onEvent]]; the model
+  * `view`'s root returns from its render is the one the next batch starts from; the first present happens before the first wait.
   *
   * @author Kevin Lee
   * @since 2026-09-05

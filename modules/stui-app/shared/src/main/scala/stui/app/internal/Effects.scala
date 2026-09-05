@@ -3,7 +3,7 @@ package stui.app.internal
 import stui.app.{StuiApp, View}
 import stui.app.internal.Tasks.*
 import stui.app.internal.Ticks.*
-import stui.core.frame.Regions
+import stui.core.frame.{Frame, Regions}
 import stui.core.geometry.Offset
 import stui.core.geometry.Position.*
 import stui.core.terminal.Terminal
@@ -28,15 +28,17 @@ private[stui] object Effects {
     ticks.reconcile(stepped.subscriptions): Unit
   }
 
-  /** Presents the model once and returns the model its root's render handed back. */
-  def present[Model, Msg](terminal: Terminal, app: StuiApp[Model, Msg], model: Model): Model = {
+  /** Presents the model once and returns the model its root's render handed back with the presented frame (the drivers' `onPresent`
+    * observation, M3c).
+    */
+  def present[Model, Msg](terminal: Terminal, app: StuiApp[Model, Msg], model: Model): (Model, Frame) = {
     val view: View[Model] = app.view(model)
     val corrected         = new AtomicReference(model)
-    terminal.draw { canvas =>
+    val completed         = terminal.draw { canvas =>
       corrected.set(view.root.render(canvas.area, canvas, model))
       view.cursor.foreach(cursor => canvas.cursor(cursor.offset(Offset(canvas.area.x.value, canvas.area.y.value))))
-    }: Unit
-    corrected.get()
+    }
+    (corrected.get(), completed.frame)
   }
 
   /** The last presented frame's hit map, empty before the first present. */

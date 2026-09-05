@@ -7,6 +7,7 @@ import refined4s.types.numeric.{NonNegInt, PosInt}
 import stui.app.internal.{BlockingDriver, QueueScheduler}
 import stui.core.capability.Capabilities
 import stui.core.event.{Event, KeyCode, KeyEvent}
+import stui.core.frame.Frame
 import stui.core.geometry.Size
 import stui.core.spi.{BlockingEventSource, ScreenMode, Subscription, TerminalError, TerminalOptions}
 import stui.core.terminal.Terminal
@@ -21,7 +22,8 @@ import scala.util.Try
 
 /** The blocking driver over the in-memory backend, a clock-advancing fake source, and the production scheduler on a manual clock
   * (design doc 10 and 12, M3b): one present per batch, the last resize, prints before the draw, drift-free ticks bounding the poll
-  * timeout, the termination flag, tasks, the render correction, and the restore path.
+  * timeout, the termination flag, tasks (a posted result presented without waiting for the poll, M3c), the render correction, and
+  * the restore path.
   *
   * @author Kevin Lee
   * @since 2026-09-05
@@ -80,6 +82,7 @@ object BlockingDriverSpec extends Properties {
           QueueScheduler.unwoken(clock),
           () => terminating.get(),
           100.millis,
+          (_: Frame) => (),
         )
       }
   }
@@ -187,7 +190,13 @@ object BlockingDriverSpec extends Properties {
     val s      = new Setup(none[Int], setup => if (setup.empties.get() === 1) setup.source.push(key('q')) else ())
     s.source.push(key('s'))
     val result = s.run(TerminalOptions.alternateScreen)
-    Assertions.eqv(result.map(_.count), 10.asRight[TerminalError])
+    Result.all(
+      List(
+        Assertions.eqv(result.map(_.count), 10.asRight[TerminalError]),
+        Assertions.eqv(s.source.polled.lift(1), (Duration.Zero: FiniteDuration).some),
+        Assertions.eqv(draws(s.backend), 4),
+      )
+    )
   }
 
   def testDeferredTask: Result = {

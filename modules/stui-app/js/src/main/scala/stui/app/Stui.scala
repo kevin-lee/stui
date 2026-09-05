@@ -4,6 +4,7 @@ import cats.syntax.all.*
 import stui.app.internal.{CallbackDriver, QueueScheduler}
 import stui.app.internal.QueueScheduler.*
 import stui.core.capability.CapabilitiesPatch
+import stui.core.frame.Frame
 import stui.core.spi.{Clock, TerminalError, TerminalOptions}
 import stui.terminal.{PlatformTerminal, TerminalSession}
 import stui.terminal.TerminalSession.*
@@ -64,6 +65,7 @@ object Stui {
         session.terminal,
         session.events,
         scheduler,
+        (_: Frame) => (),
         model => {
           session.close()
           onExit(model.asRight[TerminalError])
