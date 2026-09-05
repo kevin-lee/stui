@@ -48,6 +48,9 @@ lazy val stui = (project in file("."))
     terminalJvm,
     terminalJs,
     terminalNative,
+    appJvm,
+    appJs,
+    appNative,
     examplesJvm,
     examplesJs,
     examplesNative,
@@ -102,10 +105,16 @@ lazy val terminalJvm    = terminal
 lazy val terminalJs     = terminal.js.settings(jsSettings)
 lazy val terminalNative = terminal.native.settings(nativeSettings)
 
+lazy val app       = module("stui-app", crossProject(JVMPlatform, JSPlatform, NativePlatform))
+  .dependsOn(core, terminal, testkit % Test)
+lazy val appJvm    = app.jvm
+lazy val appJs     = app.js.settings(jsSettings)
+lazy val appNative = app.native.settings(nativeSettings)
+
 lazy val examples       = module("examples", crossProject(JVMPlatform, JSPlatform, NativePlatform))
   .settings(noPublish)
   .settings(noDoc)
-  .dependsOn(widgets, terminal)
+  .dependsOn(widgets, app)
 /* The demo owns the terminal, so it must run in its own process with standard input connected (an in-process `run` shares sbt's
  * standard input). Alternative launches: `java -cp` over `sbt "export examplesJVM/Runtime/fullClasspath"`, for Native
  * `sbt examplesNative/nativeLink` then `modules/examples/native/target/scala-3.3.8/examples`, and for Node

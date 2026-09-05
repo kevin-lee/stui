@@ -7,7 +7,8 @@ import stui.core.frame.RegionId
 /** The hit-region scheme of the widget catalogue (design doc 6.6, M2b): a [[ListView]], [[Tabs]], or [[Table]] given a base
   * [[stui.core.frame.RegionId]] records the base over its whole target first, then `base[index]` over every drawn item, so
   * `Regions.at` on an item answers the index through [[indexOf]] and "over this widget at all" (blank rows and borders included)
-  * through [[owns]]. The app decodes the routing this way until the M3 runtime owns it.
+  * through [[owns]]. The M3b runtime hands the last presented frame's `Regions` to `StuiApp.onMouse`, the application resolves the
+  * id with `Regions.at` and decodes it here.
   *
   * @author Kevin Lee
   * @since 2026-08-30
