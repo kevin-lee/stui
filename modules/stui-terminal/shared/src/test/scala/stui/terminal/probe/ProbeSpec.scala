@@ -4,7 +4,6 @@ import cats.syntax.all.*
 import hedgehog.*
 import hedgehog.runner.*
 import refined4s.types.numeric.NonNegInt
-import stui.core.buffer.GlyphWidth
 import stui.core.capability.{Capabilities, CapabilitiesPatch, ColorProfile, Multiplexer}
 import stui.core.event.Event
 import stui.core.geometry.Position
@@ -170,22 +169,21 @@ object ProbeSpec extends Properties {
       .withScrollRegionsSafe(true)
       .withKittyKeyboard(true)
       .withSgrMouse(true)
-      .withVs16Width(GlyphWidth.One)
     Result.all(
       List(
         Assertions.eqv(ProbePolicy.patch(underTmux, answers), CapabilitiesPatch.empty.withSyncOutput(true)),
         Assertions.eqv(MultiplexerPolicy.restrict(Multiplexer.None, riches), riches),
         Assertions.eqv(
           MultiplexerPolicy.restrict(Multiplexer.Tmux, riches),
-          CapabilitiesPatch.empty.withSyncOutput(true).withSgrMouse(true).withVs16Width(GlyphWidth.One),
+          CapabilitiesPatch.empty.withSyncOutput(true).withSgrMouse(true),
         ),
         Assertions.eqv(
           MultiplexerPolicy.restrict(Multiplexer.Screen, riches),
-          CapabilitiesPatch.empty.withSyncOutput(true).withVs16Width(GlyphWidth.One),
+          CapabilitiesPatch.empty.withSyncOutput(true),
         ),
         Assertions.eqv(
           MultiplexerPolicy.restrict(Multiplexer.Zellij, riches),
-          CapabilitiesPatch.empty.withSyncOutput(true).withSgrMouse(true).withVs16Width(GlyphWidth.One),
+          CapabilitiesPatch.empty.withSyncOutput(true).withSgrMouse(true),
         ),
       )
     )

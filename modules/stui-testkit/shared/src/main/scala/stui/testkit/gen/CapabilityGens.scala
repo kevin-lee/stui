@@ -1,7 +1,6 @@
 package stui.testkit.gen
 
 import hedgehog.{Gen, Range}
-import stui.core.buffer.GlyphWidth
 import stui.core.capability.{Capabilities, CapabilitiesPatch, ColorProfile, GlyphSet, Multiplexer}
 
 /** Generators for the capabilities value and for environments `Capabilities.fromEnv` reads.
@@ -21,9 +20,6 @@ object CapabilityGens {
   /** Any glyph set. */
   val glyphSet: Gen[GlyphSet] = Gen.element1(GlyphSet.Unicode, GlyphSet.Ascii)
 
-  /** One or two columns. */
-  val glyphWidth: Gen[GlyphWidth] = Gen.element1(GlyphWidth.One, GlyphWidth.Two)
-
   /** Every field random. */
   val capabilities: Gen[Capabilities] =
     for {
@@ -38,7 +34,6 @@ object CapabilityGens {
       ssh               <- Gen.boolean
       glyphs            <- glyphSet
       ambiguousWide     <- Gen.boolean
-      vs16Width         <- glyphWidth
     } yield Capabilities(
       colors,
       syncOutput,
@@ -51,7 +46,6 @@ object CapabilityGens {
       ssh,
       glyphs,
       ambiguousWide,
-      vs16Width,
     )
 
   /** A patch with every field independently present or absent. */
@@ -68,7 +62,6 @@ object CapabilityGens {
       ssh               <- Gen.boolean.option
       glyphs            <- glyphSet.option
       ambiguousWide     <- Gen.boolean.option
-      vs16Width         <- glyphWidth.option
     } yield CapabilitiesPatch(
       colors,
       syncOutput,
@@ -81,7 +74,6 @@ object CapabilityGens {
       ssh,
       glyphs,
       ambiguousWide,
-      vs16Width,
     )
 
   private val keys: List[String] = List(

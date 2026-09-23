@@ -3,7 +3,6 @@ package stui.core.capability
 import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
-import stui.core.buffer.GlyphWidth
 
 /** What the terminal can do, as a value (design doc 7.3, decision D15). Three pure layers build it: [[Capabilities.fromEnv]] reads the
   * environment into a conservative value (M1e), probe results and application overrides are patches merged on top with the law that no
@@ -25,7 +24,6 @@ final case class Capabilities(
   ssh: Boolean,
   glyphs: GlyphSet,
   ambiguousWide: Boolean,
-  vs16Width: GlyphWidth,
 ) derives Eq,
       Show,
       Hash
@@ -33,7 +31,7 @@ final case class Capabilities(
 object Capabilities {
 
   /** What every xterm-compatible terminal can do: 16 colours, SGR mouse, focus events, scroll regions, no synchronised output, no kitty
-    * keyboard, no extended underline, no multiplexer, not ssh, Unicode glyphs, narrow ambiguous characters, VS16 two columns wide.
+    * keyboard, no extended underline, no multiplexer, not ssh, Unicode glyphs, narrow ambiguous characters.
     */
   val conservative: Capabilities =
     Capabilities(
@@ -48,7 +46,6 @@ object Capabilities {
       false,
       GlyphSet.Unicode,
       false,
-      GlyphWidth.Two,
     )
 
   /** [[conservative]] with truecolour and extended underlines: nothing is degraded, for tests and terminals known to be complete. */
@@ -82,7 +79,8 @@ object Capabilities {
     *   - `syncOutput` and `kittyKeyboard`: false, they need a probe (M1f, M3).
     *   - `glyphs`: `Ascii` when dumb or when the effective locale (`LC_ALL`, else `LC_CTYPE`, else `LANG`, when set) names no UTF-8
     *     charset, `Unicode` otherwise (an unset locale included).
-    *   - `ambiguousWide` false and `vs16Width` two columns, the M4 width probe fills them.
+    *   - `ambiguousWide` false, which the M4 width probe fills (a VS16 cluster needs no width since issue 42, see `AnsiWriter` rule
+    *     R3a).
     */
   def fromEnv(env: Map[String, String]): Capabilities = {
     def value(key: String): Option[String] = env.get(key).map(_.trim).filter(_.nonEmpty)
@@ -122,7 +120,6 @@ object Capabilities {
       ssh,
       glyphs,
       false,
-      GlyphWidth.Two,
     )
   }
 
@@ -148,14 +145,10 @@ object Capabilities {
         patch.ssh.getOrElse(capabilities.ssh),
         patch.glyphs.getOrElse(capabilities.glyphs),
         patch.ambiguousWide.getOrElse(capabilities.ambiguousWide),
-        patch.vs16Width.getOrElse(capabilities.vs16Width),
       )
 
     /** The capabilities with the colour profile replaced (an application override, design doc 7.3). */
     def withColors(profile: ColorProfile): Capabilities = capabilities.copy(colors = profile)
-
-    /** The capabilities with the VS16 width replaced. */
-    def withVs16Width(width: GlyphWidth): Capabilities = capabilities.copy(vs16Width = width)
 
     /** The glyph set widgets should draw with (design doc 7.3, M2a): [[GlyphSet.Ascii]] when the terminal treats East Asian
       * Ambiguous characters as wide - most box-drawing characters are Ambiguous, so Unicode borders would take two columns there -

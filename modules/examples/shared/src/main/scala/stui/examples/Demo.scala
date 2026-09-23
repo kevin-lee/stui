@@ -353,8 +353,6 @@ object Demo {
       Span.raw(caps.multiplexer.show),
       Span.styled("  glyphs ", Style.empty.dim),
       Span.raw(caps.effectiveGlyphs.show),
-      Span.styled("  VS16 ", Style.empty.dim),
-      Span.raw(caps.vs16Width.show),
     )
     line.render(block.inner(area), canvas)
   }

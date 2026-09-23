@@ -2,14 +2,14 @@ package stui.terminal.ansi
 
 import hedgehog.{Gen, Range}
 import refined4s.types.numeric.NonNegInt
-import stui.core.buffer.{Buffer, Cell, CellUpdate}
-import stui.core.capability.Capabilities
+import stui.core.buffer.{Buffer, Canvas, Cell, CellUpdate}
 import stui.core.geometry.{Position, Rect, Size}
+import stui.core.style.Style
+import stui.core.text.{Line, Span}
 import stui.testkit.TerminalModel.QuirkProfile
-import stui.testkit.gen.{BufferGens, CapabilityGens, GeometryGens, StyleGens}
+import stui.testkit.gen.{BufferGens, GeometryGens, NastyGens, StyleGens}
 
-/** Generators for the writer laws: profiles, capabilities that agree with a profile, buffers at the origin, and ill-formed update
-  * vectors.
+/** Generators for the writer laws: profiles, buffers at the origin, VS16-heavy buffers and pairs, and ill-formed update vectors.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -18,12 +18,6 @@ object WriterGens {
 
   /** Any of the four quirk profiles. */
   val profile: Gen[QuirkProfile] = Gen.elementUnsafe(QuirkProfile.all)
-
-  /** Random capabilities whose VS16 width is the profile's. */
-  def capabilitiesFor(profile: QuirkProfile): Gen[Capabilities] = CapabilityGens.capabilities.map(_.withVs16Width(profile.vs16Width))
-
-  /** Lossless capabilities whose VS16 width is the profile's. */
-  def losslessFor(profile: QuirkProfile): Capabilities = Capabilities.lossless.withVs16Width(profile.vs16Width)
 
   /** Areas at the origin (the writer addresses viewport coordinates), width 0 to 12, height 0 to 6. */
   val originArea: Gen[Rect] = BufferGens.area.map(area => Rect.sized(area.size))
@@ -115,6 +109,52 @@ object WriterGens {
 
   /** A random buffer over the given area. */
   def bufferAt(area: Rect, ops: Range[Int]): Gen[Buffer] = BufferGens.ops(area, ops).map(BufferGens.bufferFrom(area, _))
+
+  /** VS16 clusters terminals disagree on (rule R3a): the keyboard, the heart, the smiling face, the check mark, and the keycap one. */
+  val vs16Cluster: Gen[String] = Gen.element1(
+    NastyGens.render(List(0x2328, 0xfe0f)),
+    NastyGens.render(List(0x2764, 0xfe0f)),
+    NastyGens.render(List(0x263a, 0xfe0f)),
+    NastyGens.render(List(0x2714, 0xfe0f)),
+    NastyGens.render(List(0x31, 0xfe0f, 0x20e3)),
+  )
+
+  /** One segment of a VS16-heavy line: a VS16 cluster, an ASCII letter, space, or parenthesis, a Hangul syllable, or a flag. */
+  val vs16Segment: Gen[String] = Gen.frequency1(
+    3 -> vs16Cluster,
+    3 -> Gen.element1("a", "b", " ", "("),
+    1 -> Gen.element1("한", "글"),
+    1 -> NastyGens.flagPair,
+  )
+
+  /** A line of 0 to 12 segments, each unstyled or randomly styled. */
+  val vs16Line: Gen[Line] =
+    (for {
+      segment <- vs16Segment
+      style   <- Gen.frequency1(2 -> Gen.constant(Style.empty), 1 -> StyleGens.style)
+    } yield Span.styled(segment, style)).list(Range.linear(0, 12)).map(spans => Line.fromSpans(spans.toVector))
+
+  /** The lines drawn from the area's left edge, line `y` on the area's row `y`, each cut at the area width. */
+  private def drawLines(canvas: Canvas, area: Rect, lines: List[Line]): Unit =
+    lines.zipWithIndex.foreach {
+      case (line, y) =>
+        canvas.putLine(Position(area.x, GeometryGens.nonNegOrZero(area.y.value.toLong + y.toLong)), line, area.width)
+    }
+
+  /** A VS16-heavy buffer over the area: one [[vs16Line]] per row. */
+  def vs16BufferAt(area: Rect): Gen[Buffer] =
+    vs16Line.list(Range.singleton(area.height.value)).map(lines => Buffer.empty(area).draw(canvas => drawLines(canvas, area, lines)))
+
+  /** Two VS16-heavy buffers of one origin area (width 1 to 16, height 1 to 3): independent, or the second drawn on top of the first. */
+  val vs16Pair: Gen[(Buffer, Buffer)] =
+    for {
+      width  <- Gen.int(Range.linear(1, 16))
+      height <- Gen.int(Range.linear(1, 3))
+      area = Rect.sized(Size(GeometryGens.nonNegOrZero(width.toLong), GeometryGens.nonNegOrZero(height.toLong)))
+      prev        <- vs16BufferAt(area)
+      lines       <- vs16Line.list(Range.singleton(height))
+      independent <- Gen.boolean
+    } yield (prev, (if (independent) Buffer.empty(area) else prev).draw(canvas => drawLines(canvas, area, lines)))
 
   /** Positions strictly inside a non-empty area. */
   def positionWithin(area: Rect): Gen[Position] =

@@ -19,7 +19,7 @@ import scala.annotation.tailrec
   * printable text (segmented into clusters and written with the profile's widths under DECAWM pending wrap), CR, LF (at the scroll
   * region's bottom margin the region scrolls, its top row reaching the modelled scrollback only when the region starts at row one
   * and the screen is normal, the verified xterm and kitty rule; at the screen bottom the normal screen scrolls into the scrollback
-  * while the alternate screen refuses), Cursor Position, Cursor Horizontal Absolute (the writer's join break, 2026-08-31), Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
+  * while the alternate screen refuses), Cursor Position, Cursor Horizontal Absolute (the writer's join break, 2026-08-31, and its R3a placements, 2026-09-24), Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
   * `ESC 8`, restoring the cursor, the wrap flag, and the style, or homing with defaults when nothing was saved), DECSTBM with and
   * without margins (both home the cursor, invalid margins refused), SGR (attributes, `4:n`, the named, indexed, and RGB colours, the
   * underline colour), and the private modes 25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, and 2026.
@@ -29,8 +29,9 @@ import scala.annotation.tailrec
   */
 object TerminalModel {
 
-  /** How a terminal deviates: the width it gives a VS16 cluster (fact 6 of the comparison report) and whether mode 1049 clears the
-    * alternate screen on entry (fact 13). Ambiguous width waits for the East Asian Ambiguous property in the tables (M4).
+  /** How a terminal deviates: the width it gives a VS16 cluster (fact 6 of the comparison report) - iTerm2 3.7.3 draws text-default
+    * VS16 sequences one column wide on the alternate screen and two on the normal screen by default (issue 42) - and whether mode 1049
+    * clears the alternate screen on entry (fact 13). Ambiguous width waits for the East Asian Ambiguous property in the tables (M4).
     */
   final case class QuirkProfile(vs16Width: GlyphWidth, clearsOnAlternateEntry: Boolean) derives Eq, Show, Hash
 
@@ -487,7 +488,7 @@ object TerminalModel {
 
   private def unknown(body: String, fin: Char): Either[ModelError, Screen] = ModelError.Unknown("CSI " + body + fin.toString).asLeft[Screen]
 
-  /** Cursor Horizontal Absolute (the writer's join break of a printed row): the column within the current row, an error beyond the
+  /** Cursor Horizontal Absolute (the writer's join break and R3a placements in a printed row): the column within the current row, an error beyond the
     * width, the pending wrap cleared.
     */
   private def cha(screen: Screen, body: String): Either[ModelError, Screen] = {
