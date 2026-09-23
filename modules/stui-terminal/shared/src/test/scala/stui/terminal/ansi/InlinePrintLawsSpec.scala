@@ -10,7 +10,7 @@ import stui.core.geometry.{Rect, Size}
 import stui.core.style.CellStyle
 import stui.testkit.{Assertions, TerminalModel}
 import stui.testkit.TerminalModel.{QuirkProfile, Screen}
-import stui.testkit.gen.GeometryGens
+import stui.testkit.gen.{CapabilityGens, GeometryGens}
 
 /** The inline print strategies as laws over the oracle (design doc 7.2 and 12): the region print keeps the viewport and scrolls the
   * overflow into scrollback, the overlay print erases the viewport, stacks the rows above it, and scrolls the excess, a full present
@@ -31,14 +31,14 @@ object InlinePrintLawsSpec extends Properties {
     frame: Buffer,
   )
 
-  private def printCaseOver(shape: Gen[(Size, Rect)]): Gen[PrintCase] =
+  private def printCaseOver(shape: Gen[(Size, Rect)], printedAt: Rect => Gen[Buffer]): Gen[PrintCase] =
     for {
       profile <- WriterGens.profile
-      caps    <- WriterGens.capabilitiesFor(profile)
+      caps    <- CapabilityGens.capabilities
       tv      <- shape
       prev    <- WriterGens.bufferAt(Rect.sized(tv._1), Range.linear(0, 8))
       height  <- Gen.int(Range.linear(1, 4))
-      printed <- WriterGens.bufferAt(Rect.sized(Size(tv._1.width, GeometryGens.nonNegOrZero(height.toLong))), Range.linear(0, 6))
+      printed <- printedAt(Rect.sized(Size(tv._1.width, GeometryGens.nonNegOrZero(height.toLong))))
       moved = movedViewport(tv._2, tv._1, height)
       frame <- WriterGens.bufferAt(moved, Range.linear(0, 6))
     } yield PrintCase(profile, caps, tv._1, tv._2, prev, printed, frame)
@@ -48,9 +48,16 @@ object InlinePrintLawsSpec extends Properties {
     Rect(NonNegInt(0), GeometryGens.nonNegOrZero(o2.toLong), terminal.width, viewport.height)
   }
 
-  private val regionCase: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewportWithRegion)
+  private val randomPrinted: Rect => Gen[Buffer] = area => WriterGens.bufferAt(area, Range.linear(0, 6))
 
-  private val overlayCase: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewport)
+  private val regionCase: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewportWithRegion, randomPrinted)
+
+  private val overlayCase: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewport, randomPrinted)
+
+  /* the same shapes with VS16-heavy printed rows (rule R3a, issue 42) */
+  private val regionVs16Case: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewportWithRegion, WriterGens.vs16BufferAt)
+
+  private val overlayVs16Case: Gen[PrintCase] = printCaseOver(WriterGens.terminalViewport, WriterGens.vs16BufferAt)
 
   private def normaliseWith(caps: Capabilities): CellStyle => CellStyle = style => Sgr.normalise(caps, style)
 
@@ -68,13 +75,26 @@ object InlinePrintLawsSpec extends Properties {
   override def tests: List[Test] = List(
     property("the region print keeps the viewport and scrolls the overflow into scrollback", testRegion),
     property("the overlay print erases the viewport, stacks the rows above it, and scrolls the excess", testOverlay),
+    property("a VS16-heavy region print keeps the viewport and scrolls the overflow into scrollback (R3a)", testRegionVs16),
+    property(
+      "a VS16-heavy overlay print erases the viewport, stacks the rows above it, and scrolls the excess (R3a)",
+      testOverlayVs16,
+    ),
     property("a full present after an overlay print shows the frame at the moved viewport", testOverlayThenPresent),
     property("the print byte budget holds (R10)", testBudget),
     property("the print outputs are sanitised and deterministic", testSanitised),
   )
 
-  def testRegion: Property =
-    regionCase.forAll.map { kase =>
+  def testRegion: Property = regionLaw(regionCase)
+
+  def testRegionVs16: Property = regionLaw(regionVs16Case)
+
+  def testOverlay: Property = overlayLaw(overlayCase)
+
+  def testOverlayVs16: Property = overlayLaw(overlayVs16Case)
+
+  private def regionLaw(cases: Gen[PrintCase]): Property =
+    cases.forAll.map { kase =>
       val o         = kase.viewport.y.value
       val region    = ScrollRegion(NonNegInt(0), NonNegInt.unsafeFrom(o - 1))
       val normalise = normaliseWith(kase.caps)
@@ -107,8 +127,8 @@ object InlinePrintLawsSpec extends Properties {
       }
     }
 
-  def testOverlay: Property =
-    overlayCase.forAll.map { kase =>
+  private def overlayLaw(cases: Gen[PrintCase]): Property =
+    cases.forAll.map { kase =>
       val o         = kase.viewport.y.value
       val h         = kase.viewport.height.value
       val termH     = kase.terminal.height.value

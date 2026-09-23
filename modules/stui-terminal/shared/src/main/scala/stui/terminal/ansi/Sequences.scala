@@ -19,7 +19,8 @@ object Sequences {
   /** Cursor Position, `CSI row ; column H`, both 1-based. */
   def cup(row: Int, column: Int): String = s"$Csi${row.toString};${column.toString}H"
 
-  /** Cursor Horizontal Absolute to the 1-based `column` of the current row: the join break of a printed row (rule R2a).
+  /** Cursor Horizontal Absolute to the 1-based `column` of the current row: the join break of a printed row (rule R2a) and the
+    * placements of a printed VS16 cluster (rule R3a).
     *
     * @since 2026-08-31
     */

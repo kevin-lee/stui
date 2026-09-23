@@ -74,7 +74,8 @@ object AnsiWriterFixturesSpec extends Properties {
       ),
     ),
     example("a wide glyph is emitted once", testWide),
-    example("a VS16 glyph under a narrow terminal gets a shadow space", testVs16),
+    example("a VS16 glyph blanks its two cells, is written from its first, and places the next cell (R3a)", testVs16),
+    example("a printed VS16 glyph places the next cell and the erase with CHA (R3a)", testVs16Print),
     example(
       "an orphan continuation is a default space",
       Assertions.eqv(
@@ -181,12 +182,41 @@ object AnsiWriterFixturesSpec extends Properties {
   }
 
   def testVs16: Result = {
-    val vs16 = cps(0x2328, 0xfe0f)
-    val caps = lossless.withVs16Width(GlyphWidth.One)
+    val vs16  = cps(0x2328, 0xfe0f)
+    val three = Rect.sized(Size(NonNegInt(3), NonNegInt(1)))
+    present(lossless, three, all(row(3, "a" + vs16, Style.empty))) match {
+      case (state, closing) =>
+        Result.all(
+          List(
+            Assertions.eqv(
+              present(lossless, five, all(row(5, vs16 + "a", Style.empty)))._2,
+              cup(1, 1) + "  " + cup(1, 1) + vs16 + cup(1, 3) + "a  ",
+            ),
+            Assertions.eqv(
+              present(lossless, five, all(row(5, vs16, Style.empty.withFg(Color.Red))))._2,
+              cup(1, 1) + Sequences.Csi + "31m" + "  " + cup(1, 1) + vs16 + cup(1, 3) + Sequences.Csi + "39m" + "   ",
+            ),
+            Assertions.eqv(closing, cup(1, 1) + "a" + "  " + cup(1, 2) + vs16),
+            Assertions.eqv(state.cursor, (CursorState.Unknown: CursorState)),
+          )
+        )
+    }
+  }
+
+  def testVs16Print: Result = {
+    val vs16                            = cps(0x2328, 0xfe0f)
+    def printed(buffer: Buffer): String = AnsiWriter.print(WriterState.initial, lossless, buffer)._2
     Result.all(
       List(
-        Assertions.eqv(present(caps, five, all(row(5, vs16 + "a", Style.empty)))._2, cup(1, 1) + vs16 + " " + "a  "),
-        Assertions.eqv(present(lossless, five, all(row(5, vs16 + "a", Style.empty)))._2, cup(1, 1) + vs16 + "a  "),
+        Assertions.eqv(
+          printed(row(5, vs16 + "a", Style.empty)),
+          "  " + Sequences.cha(1) + vs16 + Sequences.cha(3) + "a" + Sequences.EraseToLineEnd + Sequences.CrLf,
+        ),
+        Assertions.eqv(
+          printed(row(5, "a" + vs16, Style.empty)),
+          "a" + "  " + Sequences.cha(2) + vs16 + Sequences.cha(4) + Sequences.EraseToLineEnd + Sequences.CrLf,
+        ),
+        Assertions.eqv(printed(row(3, "a" + vs16, Style.empty)), "a" + "  " + Sequences.cha(2) + vs16 + Sequences.CrLf),
       )
     )
   }

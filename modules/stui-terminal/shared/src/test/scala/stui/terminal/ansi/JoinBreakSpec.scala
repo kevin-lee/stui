@@ -10,7 +10,7 @@ import stui.core.geometry.{Position, Rect, Size}
 import stui.core.style.{CellStyle, Style}
 import stui.testkit.{Assertions, TerminalModel}
 import stui.testkit.TerminalModel.{QuirkProfile, Screen}
-import stui.testkit.gen.{GeometryGens, NastyGens}
+import stui.testkit.gen.{CapabilityGens, GeometryGens, NastyGens}
 import stui.unicode.WidthPolicy
 import stui.unicode.internal.CodePointProperties
 import stui.unicode.internal.CodePointProperties.Gcb
@@ -28,7 +28,7 @@ object JoinBreakSpec extends Properties {
 
   private val profile: QuirkProfile = QuirkProfile(GlyphWidth.Two, true)
 
-  private val caps: Capabilities = WriterGens.losslessFor(profile)
+  private val caps: Capabilities = Capabilities.lossless
 
   private def normalise(capabilities: Capabilities): CellStyle => CellStyle = style => Sgr.normalise(capabilities, style)
 
@@ -112,7 +112,7 @@ object JoinBreakSpec extends Properties {
       "joinable symbols one per cell survive a present and a print",
       for {
         prof    <- WriterGens.profile.forAll
-        cap     <- WriterGens.capabilitiesFor(prof).forAll
+        cap     <- CapabilityGens.capabilities.forAll
         symbols <- joinable.list(Range.linear(2, 6)).forAll
       } yield {
         val buffer = cells(symbols.toVector)

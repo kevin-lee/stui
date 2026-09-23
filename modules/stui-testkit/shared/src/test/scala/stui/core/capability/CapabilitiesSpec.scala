@@ -2,7 +2,6 @@ package stui.core.capability
 
 import hedgehog.*
 import hedgehog.runner.*
-import stui.core.buffer.GlyphWidth
 import stui.testkit.Assertions
 import stui.testkit.gen.CapabilityGens
 
@@ -62,7 +61,6 @@ object CapabilitiesSpec extends Properties {
             Result.assert(!c.syncOutput).log("syncOutput"),
             Result.assert(!c.kittyKeyboard).log("kittyKeyboard"),
             Result.assert(!c.ambiguousWide).log("ambiguousWide"),
-            Assertions.eqv(c.vs16Width, GlyphWidth.Two),
           )
         )
       },

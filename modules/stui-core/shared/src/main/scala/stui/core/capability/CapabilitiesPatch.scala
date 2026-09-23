@@ -3,7 +3,6 @@ package stui.core.capability
 import cats.{Eq, Hash, Monoid, Show}
 import cats.derived.strict.*
 import cats.syntax.all.*
-import stui.core.buffer.GlyphWidth
 
 /** A partial [[Capabilities]] (design doc 7.3, decision D15): probe results and application overrides are patches merged over the
   * environment layer by [[Capabilities.merge]]. Every field is optional, and the monoid combines patches with the `Style.patch` law:
@@ -24,7 +23,6 @@ final case class CapabilitiesPatch(
   ssh: Option[Boolean],
   glyphs: Option[GlyphSet],
   ambiguousWide: Option[Boolean],
-  vs16Width: Option[GlyphWidth],
 ) derives Eq,
       Show,
       Hash
@@ -45,7 +43,6 @@ object CapabilitiesPatch {
       none[Boolean],
       none[GlyphSet],
       none[Boolean],
-      none[GlyphWidth],
     )
 
   /** Per field the last operand that says something wins (the `Style.patch` law). */
@@ -64,7 +61,6 @@ object CapabilitiesPatch {
         y.ssh.orElse(x.ssh),
         y.glyphs.orElse(x.glyphs),
         y.ambiguousWide.orElse(x.ambiguousWide),
-        y.vs16Width.orElse(x.vs16Width),
       )
   }
 
@@ -102,9 +98,6 @@ object CapabilitiesPatch {
 
     /** The patch with the ambiguous-width flag said. */
     def withAmbiguousWide(flag: Boolean): CapabilitiesPatch = patch.copy(ambiguousWide = flag.some)
-
-    /** The patch with the VS16 width said. */
-    def withVs16Width(width: GlyphWidth): CapabilitiesPatch = patch.copy(vs16Width = width.some)
 
   }
 

@@ -18,7 +18,8 @@ import scala.annotation.tailrec
   * (plan refinement R1 of M1f): update positions are absolute rows, the whole terminal on the alternate screen and the last rows of
   * the normal screen in inline mode, always spanning the terminal width. Rules, each a law over the testkit's `TerminalModel` oracle:
   *
-  *   - R1: after a write in the last column the tracked cursor is `PendingWrap`, and the next move is absolute.
+  *   - R1: after a write in the last column the tracked cursor is `PendingWrap` (`Unknown` after a closing VS16 cluster, R3a), and the
+  *     next move is absolute.
   *   - R2: consecutive updates advance by the glyph's terminal width without a cursor move, a `Continuation` update whose owner was
   *     not the previous emitted wide glyph is painted as a space in the default style.
   *   - R2a (2026-08-31): a glyph that would join the previously emitted cluster into one grapheme cluster on the wire (a lone
@@ -27,6 +28,11 @@ import scala.annotation.tailrec
   *     already covers it.
   *   - R3: a wide glyph is emitted with its continuation column accounted for, and a wide glyph whose shadow would fall outside the
   *     viewport is painted as a space in its style.
+  *   - R3a (2026-09-24, issue 42): a two-column VS16 cluster is written the same way whatever width the terminal gives it. Two spaces
+  *     in the cell's style go over its two cells, the cursor is placed back on its first cell (CUP in a present, CHA in a printed row),
+  *     the cluster follows, and the next write is placed explicitly: the tracked cursor becomes `Unknown` in a present, and a printed
+  *     row places its next cell or its closing erase with CHA. The screen then matches the buffer whether the terminal advances one
+  *     column or two. iTerm2 3.7.3 advances one on the alternate screen and two on the normal screen by default.
   *   - R4: a control never reaches the terminal as a glyph (impossible by the `GlyphSymbol` type).
   *   - R5: only the SGR parameters that differ from the tracked style are emitted, on the capability-normalised style, and the style is
   *     reset at the end of a present when it is not the default.
@@ -40,29 +46,31 @@ import scala.annotation.tailrec
   *     [[MaxBytesPerPrintedRow]] per row plus [[MaxBytesPerPrint]] (the overlay adds at most the terminal height in scroll line
   *     feeds).
   *
-  * A VS16 cluster advances by `Capabilities.vs16Width`, and when that is narrower than the cell the shadow column is painted with a
-  * space in the cell's style, so the tracked cursor and the screen agree on every terminal (design doc 9.3).
-  *
   * @author Kevin Lee
   * @since 2026-08-29
   */
 object AnsiWriter {
 
   /** The byte budget per update (rule R10): a Cursor Position of at most 24 bytes for ten-digit coordinates (or the CHA of a join
-    * break, at most 15), an SGR delta of at most 128 bytes, and the shadow or orphan space.
+    * break, at most 15), an SGR delta of at most 128 bytes, the orphan or cut-wide space, and for a VS16 cluster (R3a) its two blanking
+    * spaces and the placement back (at most 24): 24 + 128 + 2 + 24 = 178, rounded up.
     */
-  val MaxBytesPerCell: Int = 160
+  val MaxBytesPerCell: Int = 184
 
   /** The byte budget per present beyond the updates (rule R10): the final style reset. */
   val MaxBytesPerPresent: Int = 8
 
-  /** The byte budget per printed row beyond its cells (rule R10): the row separator (2), a style reset (4), and Erase in Line (3). */
-  val MaxBytesPerPrintedRow: Int = 12
+  /** The byte budget per printed row beyond its cells (rule R10): the row separator (2), a style reset (4), the CHA before the erase
+    * after a closing VS16 cluster (R3a, at most 15), and Erase in Line (3).
+    */
+  val MaxBytesPerPrintedRow: Int = 24
 
   /** The byte budget per print beyond the rows (rule R10): one Cursor Position (at most 24) and Erase in Display (3). */
   val MaxBytesPerPrint: Int = 32
 
-  /** `last` is the last emitted cluster of the run (`" "` after a shadow, orphan, or cut-wide space, `""` after a cursor placement). */
+  /** `last` is the last emitted cluster of the run (`" "` after an orphan or cut-wide space, `""` after a cursor placement or a VS16
+    * cluster).
+    */
   final private case class Acc(cursor: CursorState, style: CellStyle, lastWide: Option[Position], last: String)
 
   /** Emits the updates of one present over the screen-coordinate viewport and returns the state with the tracked cursor after the
@@ -138,7 +146,8 @@ object AnsiWriter {
 
   /** The rows as styled lines at the cursor (the transcript flush after restore, design doc 7.2): each row's cells up to the last
     * non-blank one, a style reset when needed, Erase in Line (a short row leaves no residue, plan refinement R4), and CR LF. The
-    * tracked cursor is unknown afterwards.
+    * tracked cursor is unknown afterwards. The rows start at column 1. The inline exit parks the cursor there, and for a shell-started
+    * application so does the mode 1049 exit, which restores the entry cursor. R2a and R3a place cells with CHA, an absolute column.
     */
   def print(state: WriterState, capabilities: Capabilities, rows: Buffer): (WriterState, String) = {
     val builder = new java.lang.StringBuilder
@@ -253,11 +262,11 @@ object AnsiWriter {
       overlayRows(cells, y + 1, rowWidth, height, next, builder, capabilities, limit)
     }
 
-  /** Emits one printed row: the cells up to the last non-blank one (style deltas, the VS16 shadow, a wide glyph straddling the limit
-    * as a space in its style), truncated at `limit` columns, then the style reset when the tracked style is not the default, then
-    * Erase in Line when fewer than `limit` columns were written (plan refinement R4; a full row needs no erase, and with the cursor
-    * on the last column under a pending wrap the erase would blank the cell just written). Returns the tracked style, always the
-    * default.
+  /** Emits one printed row: the cells up to the last non-blank one (style deltas, the R3a VS16 sequence, a wide glyph straddling the
+    * limit as a space in its style), truncated at `limit` columns, then the style reset when the tracked style is not the default,
+    * then a CHA to the first unwritten column after a closing VS16 cluster (R3a) and Erase in Line when fewer than `limit` columns
+    * were written (plan refinement R4; a full row needs no erase, and with the cursor on the last column under a pending wrap the
+    * erase would blank the cell just written). Returns the tracked style, always the default.
     */
   private def emitRow(
     cells: IArray[Cell],
@@ -268,17 +277,22 @@ object AnsiWriter {
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
   ): CellStyle = {
-    val width   = math.min(rowWidth, limit)
-    val count   = lastNonBlank(cells, rowStart, width)
-    val tracked = emitRowCells(cells, rowStart, 0, count, limit, style, builder, capabilities, "")
-    val reset   =
+    val width             = math.min(rowWidth, limit)
+    val count             = lastNonBlank(cells, rowStart, width)
+    val (tracked, synced) = emitRowCells(cells, rowStart, 0, count, limit, style, builder, capabilities, "", true)
+    val reset             =
       if (tracked =!= CellStyle.default) {
         builder.append(Sequences.SgrReset): Unit
         CellStyle.default
       } else {
         tracked
       }
-    if (count < limit) builder.append(Sequences.EraseToLineEnd): Unit else ()
+    if (count < limit) {
+      if (synced) () else builder.append(Sequences.cha(count + 1)): Unit
+      builder.append(Sequences.EraseToLineEnd): Unit
+    } else {
+      ()
+    }
     reset
   }
 
@@ -288,6 +302,9 @@ object AnsiWriter {
     else if (cells(rowStart + width - 1) =!= Cell.blank) width
     else lastNonBlank(cells, rowStart, width - 1)
 
+  /** The cells `c` until `count` of a printed row. `synced` says the terminal cursor is known to be at column `c` (false after a VS16
+    * cluster, rule R3a, so the next cell is placed with CHA). Returns the tracked style and `synced` at `count`.
+    */
   @tailrec
   private def emitRowCells(
     cells: IArray[Cell],
@@ -299,27 +316,31 @@ object AnsiWriter {
     builder: java.lang.StringBuilder,
     capabilities: Capabilities,
     last: String,
-  ): CellStyle =
+    synced: Boolean,
+  ): (CellStyle, Boolean) =
     if (c >= count) {
-      style
+      (style, synced)
     } else {
-      val (next, emitted) = cells(rowStart + c) match {
-        case Cell.Continuation(_) => (style, last)
+      val (next, emitted, known) = cells(rowStart + c) match {
+        case Cell.Continuation(_) => (style, last, synced)
         case Cell.Glyph(symbol, glyphWidth, cellStyle) =>
           val tracked = ensureStyle(style, builder, capabilities, cellStyle)
+          if (synced) () else builder.append(Sequences.cha(c + 1)): Unit
           if (glyphWidth.columns === 2 && c + 1 >= limit) {
-            breakJoin(builder, last, " ", c)
+            if (synced) breakJoin(builder, last, " ", c) else ()
             builder.append(' '): Unit
-            (tracked, " ")
+            (tracked, " ", true)
+          } else if (glyphWidth.columns === 2 && symbol.isVs16Sequence) {
+            if (synced) breakJoin(builder, last, " ", c) else ()
+            builder.append("  ").append(Sequences.cha(c + 1)).append(symbol.value): Unit
+            (tracked, "", false)
           } else {
-            val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else glyphWidth.columns
-            breakJoin(builder, last, symbol.value, c)
+            if (synced) breakJoin(builder, last, symbol.value, c) else ()
             builder.append(symbol.value): Unit
-            appendSpaces(builder, glyphWidth.columns - terminalWidth)
-            (tracked, if (glyphWidth.columns - terminalWidth > 0) " " else symbol.value)
+            (tracked, symbol.value, true)
           }
       }
-      emitRowCells(cells, rowStart, c + 1, count, limit, next, builder, capabilities, emitted)
+      emitRowCells(cells, rowStart, c + 1, count, limit, next, builder, capabilities, emitted, known)
     }
 
   /** The CHA to cell `c`'s column when `next` would join `last` (rule R2a) in a printed row. */
@@ -349,14 +370,15 @@ object AnsiWriter {
           update.cell match {
             case Cell.Continuation(_) =>
               if (acc.lastWide.exists(owner => owner.x.value === x - 1 && owner.y.value === y)) acc
-              else emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, CellStyle.default, 1)
+              else emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, CellStyle.default)
             case Cell.Glyph(symbol, glyphWidth, style) =>
               val columns = glyphWidth.columns
               if (columns === 2 && x.toLong + 1L >= right) {
-                emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, style, 1)
+                emitGlyph(acc, builder, capabilities, right, x, y, GlyphSymbol.space, 1, style)
+              } else if (columns === 2 && symbol.isVs16Sequence) {
+                emitVs16(acc, builder, capabilities, x, y, symbol, style)
               } else {
-                val terminalWidth = if (symbol.isVs16Sequence) capabilities.vs16Width.columns else columns
-                emitGlyph(acc, builder, capabilities, right, x, y, symbol, columns, style, terminalWidth)
+                emitGlyph(acc, builder, capabilities, right, x, y, symbol, columns, style)
               }
           }
         }
@@ -373,7 +395,6 @@ object AnsiWriter {
     symbol: GlyphSymbol,
     columns: Int,
     style: CellStyle,
-    terminalWidth: Int,
   ): Acc = {
     val continuing = acc.cursor match {
       case CursorState.Known(current) => current.x.value === x && current.y.value === y
@@ -383,15 +404,40 @@ object AnsiWriter {
     val cursor     = ensureCursor(cursor0, builder, x, y)
     val tracked    = ensureStyle(acc.style, builder, capabilities, style)
     builder.append(symbol.value): Unit
-    appendSpaces(builder, columns - terminalWidth)
-    val last       = if (columns - terminalWidth > 0) " " else symbol.value
     val nx         = x.toLong + columns.toLong
     val after      =
       if (nx >= right) CursorState.PendingWrap(NonNegInts.clamp(y.toLong))
       else CursorState.Known(Position(NonNegInts.clamp(nx), NonNegInts.clamp(y.toLong)))
     val wide       = if (columns === 2) Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)).some else none[Position]
     val _          = cursor
-    Acc(after, tracked, wide, last)
+    Acc(after, tracked, wide, symbol.value)
+  }
+
+  /** Rule R3a: two spaces in the cell's style over the cluster's two cells, the CUP back on its first cell, and the cluster, leaving the
+    * cursor unknown so the next write is placed explicitly, whether the terminal advanced one column or two.
+    */
+  private def emitVs16(
+    acc: Acc,
+    builder: java.lang.StringBuilder,
+    capabilities: Capabilities,
+    x: Int,
+    y: Int,
+    symbol: GlyphSymbol,
+    style: CellStyle,
+  ): Acc = {
+    val continuing = acc.cursor match {
+      case CursorState.Known(current) => current.x.value === x && current.y.value === y
+      case CursorState.PendingWrap(_) | CursorState.Unknown => false
+    }
+    val cursor0    = if (continuing && Graphemes.joins(acc.last, " ")) CursorState.Unknown else acc.cursor
+    val start      = ensureCursor(cursor0, builder, x, y)
+    val tracked    = ensureStyle(acc.style, builder, capabilities, style)
+    builder.append("  "): Unit
+    val back       = ensureCursor(CursorState.Unknown, builder, x, y)
+    builder.append(symbol.value): Unit
+    val _          = start
+    val _          = back
+    Acc(CursorState.Unknown, tracked, Position(NonNegInts.clamp(x.toLong), NonNegInts.clamp(y.toLong)).some, "")
   }
 
   private def ensureCursor(cursor: CursorState, builder: java.lang.StringBuilder, x: Int, y: Int): CursorState =
@@ -416,15 +462,6 @@ object AnsiWriter {
       normalised
     }
   }
-
-  @tailrec
-  private def appendSpaces(builder: java.lang.StringBuilder, n: Int): Unit =
-    if (n <= 0) {
-      ()
-    } else {
-      builder.append(' '): Unit
-      appendSpaces(builder, n - 1)
-    }
 
   /** The UTF-8 length of the glyph symbols in the updates, the `symbolBytes` term of rule R10. */
   def symbolBytes(updates: Vector[CellUpdate]): Long =

@@ -57,7 +57,6 @@ object CapabilitiesPatchSpec extends Properties {
           field("ssh")(merged.ssh === base.ssh, combined.ssh.isDefined),
           field("glyphs")(merged.glyphs === base.glyphs, combined.glyphs.isDefined),
           field("ambiguousWide")(merged.ambiguousWide === base.ambiguousWide, combined.ambiguousWide.isDefined),
-          field("vs16Width")(merged.vs16Width === base.vs16Width, combined.vs16Width.isDefined),
         )
       )
     }
@@ -87,7 +86,6 @@ object CapabilitiesPatchSpec extends Properties {
       CapabilitiesPatch.empty.withSsh(true),
       CapabilitiesPatch.empty.withGlyphs(GlyphSet.Ascii),
       CapabilitiesPatch.empty.withAmbiguousWide(true),
-      CapabilitiesPatch.empty.withVs16Width(stui.core.buffer.GlyphWidth.One),
     )
     /* each builder must produce a patch that says exactly one field */
     val counts   = builders.map { patch =>
@@ -103,10 +101,9 @@ object CapabilitiesPatchSpec extends Properties {
         patch.ssh.isDefined,
         patch.glyphs.isDefined,
         patch.ambiguousWide.isDefined,
-        patch.vs16Width.isDefined,
       ).count(identity)
     }
-    Assertions.eqv(counts, List.fill(12)(1))
+    Assertions.eqv(counts, List.fill(11)(1))
   }
 
 }
