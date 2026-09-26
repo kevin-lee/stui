@@ -50,6 +50,10 @@ object TerminalModelSpec extends Properties {
       Assertions.eqv(rows(TerminalModel.interpret(default, blank(3, 1), cup(1, 1) + "ab")), Right(Vector("ab "))),
     ),
     example("the cursor advances by the text", testCursorAdvance),
+    example("a kitty push and pop on the normal screen", testKittyMain),
+    example("a kitty push on the alternate screen leaves the normal stack", testKittyAlternate),
+    example("a kitty pop on an empty stack leaves no flags", testKittyEmptyPop),
+    example("the kitty set and query forms are unknown", testKittyUnknown),
     example("CHA moves within the row and clears the pending wrap", testCha),
     example("CHA beyond the width is an error", testChaOutside),
     example("the last column sets pending wrap", testPendingWrap),
@@ -321,5 +325,46 @@ object TerminalModelSpec extends Properties {
 
   def testChaOutside: Result =
     Result.assert(TerminalModel.interpret(default, blank(3, 1), csi + "4G").isLeft).log("CHA beyond the width was accepted")
+
+  def testKittyMain: Result =
+    TerminalModel.interpret(QuirkProfile.default, blank(1, 1), csi + ">1u" + csi + ">3u") match {
+      case Right(pushed) =>
+        Result.all(
+          List(
+            Assertions.eqv(pushed.keyboardMain, List(3, 1)),
+            Assertions.eqv(TerminalModel.keyboardFlags(pushed), 3),
+            Assertions.eqv(TerminalModel.interpret(QuirkProfile.default, pushed, csi + "<u").map(_.keyboardMain), Right(List(1))),
+            Assertions.eqv(TerminalModel.interpret(QuirkProfile.default, pushed, csi + "<2u").map(_.keyboardMain), Right(List.empty[Int])),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testKittyAlternate: Result =
+    TerminalModel.interpret(QuirkProfile.default, blank(1, 1), csi + ">5u" + csi + "?1049h" + csi + ">1u") match {
+      case Right(screen) =>
+        Result.all(
+          List(
+            Assertions.eqv(screen.keyboardMain, List(5)),
+            Assertions.eqv(screen.keyboardAlternate, List(1)),
+            Assertions.eqv(TerminalModel.keyboardFlags(screen), 1),
+          )
+        )
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testKittyEmptyPop: Result =
+    Assertions.eqv(
+      TerminalModel.interpret(QuirkProfile.default, blank(1, 1), csi + "<u").map(TerminalModel.keyboardFlags),
+      Right(0),
+    )
+
+  def testKittyUnknown: Result =
+    Result.all(
+      List(
+        Result.assert(TerminalModel.interpret(QuirkProfile.default, blank(1, 1), csi + "=1u").isLeft).log("set"),
+        Result.assert(TerminalModel.interpret(QuirkProfile.default, blank(1, 1), csi + "?u").isLeft).log("query"),
+      )
+    )
 
 }

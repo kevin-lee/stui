@@ -22,7 +22,9 @@ import scala.annotation.tailrec
   * while the alternate screen refuses), Cursor Position, Cursor Horizontal Absolute (the writer's join break, 2026-08-31, and its R3a placements, 2026-09-24), Erase in Display 0 and 2, Erase in Line 0, DECSC and DECRC (`ESC 7`,
   * `ESC 8`, restoring the cursor, the wrap flag, and the style, or homing with defaults when nothing was saved), DECSTBM with and
   * without margins (both home the cursor, invalid margins refused), SGR (attributes, `4:n`, the named, indexed, and RGB colours, the
-  * underline colour), and the private modes 25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, and 2026.
+  * underline colour), the private modes 25, 1049, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 2004, 1004, and 2026, and the kitty keyboard
+  * protocol's push `CSI > flags u` and pop `CSI < n u` over separate stacks for the normal and alternate screens (M3d, the
+  * specification's rule: a pop that empties a stack leaves no flags).
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -76,7 +78,8 @@ object TerminalModel {
 
   /** The modelled terminal: the screen cells (over the profile's policy), the cursor with the DECAWM pending-wrap flag, the cursor
     * visibility, the current SGR state, whether the alternate screen is active, the private modes currently set, the scroll region,
-    * the DECSC save, and the scrollback rows that scrolled off the top of the normal screen (oldest first).
+    * the DECSC save, the scrollback rows that scrolled off the top of the normal screen (oldest first), and the kitty keyboard stacks
+    * of the normal and the alternate screen (the head is the current flags, an empty stack means none).
     */
   final case class Screen(
     buffer: Buffer,
@@ -89,6 +92,8 @@ object TerminalModel {
     region: Option[Region],
     saved: Option[SavedCursor],
     scrollback: Vector[Vector[Cell]],
+    keyboardMain: List[Int],
+    keyboardAlternate: List[Int],
   ) derives Eq,
         Show
 
@@ -109,6 +114,8 @@ object TerminalModel {
         none[Region],
         none[SavedCursor],
         Vector.empty[Vector[Cell]],
+        List.empty[Int],
+        List.empty[Int],
       )
 
     /** The screen showing [[expected]] of the buffer, cursor at the origin and hidden, default style. */
@@ -127,6 +134,8 @@ object TerminalModel {
         none[Region],
         none[SavedCursor],
         Vector.empty[Vector[Cell]],
+        List.empty[Int],
+        List.empty[Int],
       )
 
     /** The screen showing `part` placed at its own area on a blank terminal of the given size, cursor at the origin and hidden (the
@@ -144,6 +153,8 @@ object TerminalModel {
         none[Region],
         none[SavedCursor],
         Vector.empty[Vector[Cell]],
+        List.empty[Int],
+        List.empty[Int],
       )
 
   }
@@ -474,6 +485,11 @@ object TerminalModel {
         }
       }
     case 'm' => sgr(splitParams(body), screen.style).map(style => screen.copy(style = style))
+    case 'u' =>
+      if (body.startsWith(">")) keyboard(screen, parseNumber(body.substring(1)).getOrElse(0) :: currentKeyboard(screen)).asRight[ModelError]
+      else if (body.startsWith("<"))
+        keyboard(screen, currentKeyboard(screen).drop(parseNumber(body.substring(1)).getOrElse(1))).asRight[ModelError]
+      else unknown(body, fin)
     case 'h' | 'l' =>
       if (body.startsWith("?")) {
         parseNumber(body.substring(1)) match {
@@ -487,6 +503,14 @@ object TerminalModel {
   }
 
   private def unknown(body: String, fin: Char): Either[ModelError, Screen] = ModelError.Unknown("CSI " + body + fin.toString).asLeft[Screen]
+
+  private def currentKeyboard(screen: Screen): List[Int] = if (screen.alternate) screen.keyboardAlternate else screen.keyboardMain
+
+  private def keyboard(screen: Screen, stack: List[Int]): Screen =
+    if (screen.alternate) screen.copy(keyboardAlternate = stack) else screen.copy(keyboardMain = stack)
+
+  /** The kitty keyboard flags of the active screen: its stack's head, 0 when the stack is empty. */
+  def keyboardFlags(screen: Screen): Int = currentKeyboard(screen).headOption.getOrElse(0)
 
   /** Cursor Horizontal Absolute (the writer's join break and R3a placements in a printed row): the column within the current row, an error beyond the
     * width, the pending wrap cleared.

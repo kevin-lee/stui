@@ -7,6 +7,7 @@ import stui.core.spi.{Clock, TerminalError, TerminalOptions}
 import stui.core.terminal.Terminal
 import stui.terminal.decoder.{Decoded, Decoder, DecoderInput, DecoderState, Reply}
 import stui.terminal.internal.{NodeBytes, NodeProcess, NodeTty}
+import stui.terminal.kitty.KittyKeyboard
 import stui.terminal.probe.{ProbePolicy, ProbeQueries, ProbeResult}
 import stui.unicode.WidthPolicy
 
@@ -23,7 +24,9 @@ import scala.scalajs.js.timers
   * exception runs it and the trace lands after the restore, M0-verified), and the mandatory SIGTERM and SIGINT handlers close and
   * exit with 128 plus the signal number (143 and 130, the Native convention), because the exit event does not fire on unhandled
   * signals. Both screen modes are supported. Because nothing may block on Node, `use` is a continuation receiving the session or the
-  * error, and the application ends the session with `TerminalSession.close()`.
+  * error, and the application ends the session with `TerminalSession.close()`. The push event source starts with the pushed kitty
+  * flags and the stall-aware ESC timeout (M3d). No window exists between the entry (the kitty keyboard push) and the handlers: Node
+  * is single-threaded, so a signal event cannot run between `Terminal.open` and their registration.
   *
   * @author Kevin Lee
   * @since 2026-08-31
@@ -113,6 +116,7 @@ object PlatformTerminal {
   ): Unit = {
     val capabilities = Capabilities.merge(envCaps, ProbePolicy.patch(envCaps, probe), overrides)
     val backend      = AnsiBackend.withEntryRow(tty, capabilities, probe.cursorRow)
+    val keyboard     = KittyKeyboard.flagsFor(options, capabilities)
     Terminal.open(WidthPolicy.default, backend, options, capabilities, Clock.system) match {
       case Left(error) =>
         tty.restoreMode()
@@ -121,12 +125,12 @@ object PlatformTerminal {
       case Right(terminal) =>
         val events  = new PushEventSource(
           EffectiveSize.of(options),
-          options.escTimeout.resolve(capabilities.ssh),
+          KittyKeyboard.escTimeout(options.escTimeout.resolve(capabilities.ssh), keyboard),
           (delay, body) => {
             val handle = timers.setTimeout(delay)(body())
             () => timers.clearTimeout(handle)
           },
-          probe.decoder,
+          probe.decoder.withKeyboard(keyboard),
           probe.events,
           tty.size(),
         )

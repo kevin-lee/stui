@@ -45,6 +45,7 @@ final class NodeTty private (private val saved: AtomicBoolean) extends Tty {
     }
   }
 
+  /* Node has no tcflush: input the terminal encoded before it processed the kitty pop stays queued for the shell (design doc 7.4) */
   override def restoreMode(): Unit =
     if (saved.getAndSet(false)) Try(NodeProcess.stdin.setRawMode(false)).fold(_ => (), _ => ()) else ()
 

@@ -76,7 +76,7 @@ object Capabilities {
     *     else a `TERM` containing `256color` is `Ansi256`, else `Ansi16` (an unset `TERM` included).
     *   - `extendedUnderline`: a known terminal (kitty, foot, WezTerm, ghostty, contour, iTerm2) outside any multiplexer and not dumb.
     *   - `sgrMouse`: not dumb and not under screen. `focusEvents`: not dumb. `scrollRegionsSafe`: not dumb and no multiplexer.
-    *   - `syncOutput` and `kittyKeyboard`: false, they need a probe (M1f, M3).
+    *   - `syncOutput` and `kittyKeyboard`: false, they need a probe (M1f, M3d).
     *   - `glyphs`: `Ascii` when dumb or when the effective locale (`LC_ALL`, else `LC_CTYPE`, else `LANG`, when set) names no UTF-8
     *     charset, `Unicode` otherwise (an unset locale included).
     *   - `ambiguousWide` false, which the M4 width probe fills (a VS16 cluster needs no width since issue 42, see `AnsiWriter` rule

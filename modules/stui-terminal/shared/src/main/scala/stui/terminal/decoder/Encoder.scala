@@ -2,14 +2,22 @@ package stui.terminal.decoder
 
 import cats.syntax.all.*
 import stui.core.event.*
+import stui.terminal.kitty.KittyFlags
 import stui.unicode.internal.IntOps.*
 
 import java.nio.charset.StandardCharsets
 
-/** The canonical xterm byte sequence of an event, for the events that have exactly one (design doc 7.5, the round-trip law): the
-  * decoder gives the event back from these bytes (followed by a tick for the lone Escape). `None` for events the decoder never
-  * produces from one sequence: an uppercase letter without Shift, Super or Hyper modifiers, key repeats and releases, media and
-  * modifier keys, function keys above F20, resizes, and a paste containing ESC.
+/** The canonical byte sequences of events, for the round-trip law (design doc 7.5), in two modes.
+  *
+  *   - [[encode]], the legacy xterm form: the decoder in its initial state gives the event back from these bytes (followed by a tick
+  *     for the lone Escape). `None` for events the decoder never produces from one sequence: an uppercase letter without Shift, Super
+  *     or Hyper modifiers, key repeats and releases, media and modifier keys, function keys above F20, resizes, and a paste
+  *     containing ESC.
+  *   - [[encodeKitty]], the kitty keyboard protocol form (M3d): the decoder with the flags pushed gives the event back. Keys use the
+  *     kitty modifier bits and kinds, `CSI u` for characters and the named and Private Use Area keys, the letter forms and the tilde
+  *     forms the specification keeps (F3 as `CSI 13 ~`), and a character's own text as associated text when the flags ask for all keys
+  *     and text. `None` for the forms the decoder normalises away: a letter whose case disagrees with Shift, Tab with Shift (BackTab),
+  *     BackTab without Shift, controls, surrogates, Private Use Area characters, and repeats or releases without `EventTypes`.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -41,6 +49,105 @@ object Encoder {
   }
 
   private def ascii(s: String): Vector[Byte] = s.getBytes(StandardCharsets.US_ASCII).toVector
+
+  /** The canonical kitty keyboard protocol bytes of the event for a decoder with `flags` pushed, or `None` when there are none (M3d). */
+  def encodeKitty(flags: KittyFlags, event: Event): Option[IArray[Byte]] = {
+    val bytes = event match {
+      case Event.Key(KeyEvent(code, modifiers, kind)) => kittyKey(flags, code, modifiers, kind)
+      case Event.Mouse(_) | Event.Paste(_) | Event.FocusGained | Event.FocusLost => encode(event).map(_.toVector)
+      case Event.Resize(_) => none[Vector[Byte]]
+    }
+    bytes.map(v => IArray.from(v))
+  }
+
+  /** `Shift 1 + Alt 2 + Control 4 + Super 8 + Hyper 16 + Meta 32`. */
+  private def kittyBits(modifiers: KeyModifiers): Int =
+    (if (modifiers.contains(KeyModifier.Shift)) 1 else 0) + (if (modifiers.contains(KeyModifier.Alt)) 2 else 0) +
+      (if (modifiers.contains(KeyModifier.Control)) 4 else 0) + (if (modifiers.contains(KeyModifier.Super)) 8 else 0) +
+      (if (modifiers.contains(KeyModifier.Hyper)) 16 else 0) + (if (modifiers.contains(KeyModifier.Meta)) 32 else 0)
+
+  private def kittyKey(flags: KittyFlags, code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind): Option[Vector[Byte]] = {
+    val suffix = kind match {
+      case KeyEventKind.Press => "".some
+      case KeyEventKind.Repeat => Option.when(flags.contains(KittyFlags.EventTypes))(":2")
+      case KeyEventKind.Release => Option.when(flags.contains(KittyFlags.EventTypes))(":3")
+    }
+    suffix.flatMap { kindSuffix =>
+      val parameter                         = 1 + kittyBits(modifiers)
+      val field                             = if (parameter === 1 && kindSuffix.isEmpty) "" else ";" + parameter.toString + kindSuffix
+      val shift                             = modifiers.contains(KeyModifier.Shift)
+      def u(n: Int): Vector[Byte]           = Csi ++ ascii(n.toString + field + "u")
+      def tilded(n: Int): Vector[Byte]      = Csi ++ ascii(n.toString + field + "~")
+      def lettered(fin: Char): Vector[Byte] = if (field.isEmpty) Csi :+ fin.toByte else (Csi ++ ascii("1" + field)) :+ fin.toByte
+      code match {
+        case KeyCode.Char(c) => kittyChar(flags, c, modifiers, kind, field)
+        case KeyCode.Enter => u(13).some
+        case KeyCode.Escape => u(27).some
+        case KeyCode.Backspace => u(127).some
+        case KeyCode.Tab => if (shift) none[Vector[Byte]] else u(9).some
+        case KeyCode.BackTab => if (shift) u(9).some else none[Vector[Byte]]
+        case KeyCode.Up => lettered('A').some
+        case KeyCode.Down => lettered('B').some
+        case KeyCode.Right => lettered('C').some
+        case KeyCode.Left => lettered('D').some
+        case KeyCode.Home => lettered('H').some
+        case KeyCode.End => lettered('F').some
+        case KeyCode.Insert => tilded(2).some
+        case KeyCode.Delete => tilded(3).some
+        case KeyCode.PageUp => tilded(5).some
+        case KeyCode.PageDown => tilded(6).some
+        case KeyCode.F(n) =>
+          n.value match {
+            case 1 => lettered('P').some
+            case 2 => lettered('Q').some
+            case 3 => tilded(13).some
+            case 4 => lettered('S').some
+            case 5 => tilded(15).some
+            case 6 => tilded(17).some
+            case 7 => tilded(18).some
+            case 8 => tilded(19).some
+            case 9 => tilded(20).some
+            case 10 => tilded(21).some
+            case 11 => tilded(23).some
+            case 12 => tilded(24).some
+            case _ => KittyKeys.codeOf(code).map(u)
+          }
+        case KeyCode.CapsLock | KeyCode.ScrollLock | KeyCode.NumLock | KeyCode.PrintScreen | KeyCode.Pause | KeyCode.Menu |
+            KeyCode.KeypadBegin | KeyCode.Media(_) | KeyCode.Modifier(_) =>
+          KittyKeys.codeOf(code).map(u)
+      }
+    }
+  }
+
+  /** A character: the lowercase key code with Shift for `A` to `Z`, the character itself otherwise, and its own text as associated
+    * text when the flags ask for all keys and text and the modifiers are exactly the text's (Shift only for `A` to `Z`).
+    */
+  private def kittyChar(flags: KittyFlags, c: Char, modifiers: KeyModifiers, kind: KeyEventKind, field: String): Option[Vector[Byte]] = {
+    val upper = c >= 'A' && c <= 'Z'
+    val lower = c >= 'a' && c <= 'z'
+    val shift = modifiers.contains(KeyModifier.Shift)
+    val cp    = c.toInt
+    if (
+      Character.isSurrogate(c) || c < ' ' || cp === 0x7f || (cp >= KittyKeys.First && cp <= KittyKeys.Last) || (upper && !shift) ||
+      (lower && shift)
+    ) {
+      none[Vector[Byte]]
+    } else {
+      val keyCode   = if (upper) cp + 0x20 else cp
+      val textMods  = if (upper) KeyModifiers(KeyModifier.Shift) else KeyModifiers.empty
+      val textField = kind match {
+        case KeyEventKind.Press => "".some
+        case KeyEventKind.Repeat => "1:2".some
+        case KeyEventKind.Release => none[String]
+      }
+      textField.filter(_ =>
+        flags.contains(KittyFlags.AllKeys) && flags.contains(KittyFlags.AssociatedText) && modifiers === textMods
+      ) match {
+        case Some(textKind) => (Csi ++ ascii(keyCode.toString + ";" + textKind + ";" + cp.toString + "u")).some
+        case None => (Csi ++ ascii(keyCode.toString + field + "u")).some
+      }
+    }
+  }
 
   private def key(code: KeyCode, modifiers: KeyModifiers): Option[Vector[Byte]] = code match {
     case KeyCode.Char(c) => char(c, modifiers)

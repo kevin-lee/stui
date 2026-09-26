@@ -8,10 +8,12 @@ import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.spi.{PrintEffect, ScreenMode, TerminalBackend, TerminalError, TerminalOptions}
 import stui.terminal.ansi.{AnsiWriter, InlineStrategy, ScrollRegion, Sequences, WriterState}
+import stui.terminal.kitty.{KittyFlags, KittyKeyboard}
 import stui.unicode.WidthPolicy
 
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 /** The shared ANSI backend (design doc 7.1 and 7.2): a [[stui.core.spi.TerminalBackend]] over a platform [[Tty]] that queues the
   * writer's output until `flush`. On the alternate screen the viewport is the whole terminal. In inline mode the viewport is computed
@@ -20,9 +22,11 @@ import java.util.concurrent.atomic.AtomicReference
   * refinement R7 of M1f), reconciled on every terminal size change (the origin re-clamped and the region re-armed through the
   * DECSC / DECRC bracket), and printed rows go through the scroll-region strategy when it is armed and the overlay otherwise.
   * `flush` wraps the pending output in the DEC 2026 bracket when the capabilities say so (writer rule R6 at flush granularity, plan
-  * refinement R9). `enter` writes the entry sequence immediately after raw mode succeeds, `exit` discards anything not yet flushed,
-  * writes the mode's fixed reset, and restores the terminal mode, once. The size is the device's last non-zero report, 80 x 24
-  * before any report.
+  * refinement R9). `enter` writes the entry sequence immediately after raw mode succeeds, with the kitty keyboard push of
+  * `KittyKeyboard.flagsFor` recorded in the state (M3d), and `exit` discards anything not yet flushed, writes the reset of what was
+  * entered (one kitty pop per push, none without one), and restores the terminal mode, once. `enter` and `exit` run under one lock,
+  * so an exit from a shutdown hook on another thread never falls between raw mode and the entry write (plan refinement D2 of M3d).
+  * The size is the device's last non-zero report, 80 x 24 before any report.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -33,6 +37,7 @@ final class AnsiBackend private (
   val policy: WidthPolicy,
   private val entryRow: Option[NonNegInt],
   private val ref: AtomicReference[AnsiBackend.State],
+  private val lock: ReentrantLock,
 ) extends TerminalBackend {
 
   import AnsiBackend.InlineGeometry
@@ -174,14 +179,15 @@ final class AnsiBackend private (
     * immediately: the alternate screen with an explicit clear, or the inline entry computed from the probed cursor row (design doc
     * 7.2).
     */
-  override def enter(options: TerminalOptions): Either[TerminalError, Unit] =
+  override def enter(options: TerminalOptions): Either[TerminalError, Unit] = guarded {
+    val flags = KittyKeyboard.flagsFor(options, capabilities)
     if (!tty.isTerminal) {
       (TerminalError.NotATerminal: TerminalError).asLeft[Unit]
     } else {
       options.screenMode match {
         case ScreenMode.AlternateScreen =>
           tty.enterRawMode().map { _ =>
-            AnsiWriter.enter(options) match {
+            AnsiWriter.enter(options, flags) match {
               case (writer, output) =>
                 tty.write(output.getBytes(StandardCharsets.UTF_8))
                 ref.updateAndGet(
@@ -191,6 +197,7 @@ final class AnsiBackend private (
                     entered = true,
                     mode = (ScreenMode.AlternateScreen: ScreenMode).some,
                     inline = none[InlineGeometry],
+                    keyboard = flags,
                   )
                 ): Unit
             }
@@ -212,7 +219,7 @@ final class AnsiBackend private (
               } else {
                 none[ScrollRegion]
               }
-            AnsiWriter.enterInline(options, pad, region) match {
+            AnsiWriter.enterInline(options, pad, region, flags) match {
               case (writer, output) =>
                 tty.write(output.getBytes(StandardCharsets.UTF_8))
                 ref.updateAndGet(
@@ -225,17 +232,20 @@ final class AnsiBackend private (
                       Rect(NonNegInt(0), NonNegInts.clamp(o.toLong), term.width, NonNegInts.clamp(h.toLong)),
                       term,
                     ).some,
+                    keyboard = flags,
                   )
                 ): Unit
             }
           }
       }
     }
+  }
 
-  /** Discards queued output, writes the mode's fixed reset (the safe reset on the alternate screen, the inline exit with the region
-    * reset and the parked cursor in inline mode), and restores the terminal mode, only when entered.
+  /** Discards queued output, writes the reset of what was entered (the kitty pop of the pushed flags, then the safe reset on the
+    * alternate screen, or the inline exit with the region reset and the parked cursor in inline mode), and restores the terminal
+    * mode, only when entered.
     */
-  override def exit(): Unit = {
+  override def exit(): Unit = guarded {
     val state = ref.getAndUpdate(
       _.copy(
         writer = WriterState.initial,
@@ -243,18 +253,27 @@ final class AnsiBackend private (
         entered = false,
         mode = none[ScreenMode],
         inline = none[InlineGeometry],
+        keyboard = KittyFlags.none,
       )
     )
     if (state.entered) {
       val reset = state.mode match {
-        case Some(ScreenMode.Inline(_)) => AnsiWriter.exitInline(state.inline.fold(Rect.sized(state.lastSize))(_.viewport))
-        case Some(ScreenMode.AlternateScreen) | None => AnsiWriter.exit
+        case Some(ScreenMode.Inline(_)) =>
+          AnsiWriter.exitInline(state.inline.fold(Rect.sized(state.lastSize))(_.viewport), state.keyboard)
+        case Some(ScreenMode.AlternateScreen) | None => AnsiWriter.exit(state.keyboard)
       }
       tty.write(reset.getBytes(StandardCharsets.UTF_8))
       tty.restoreMode()
     } else {
       ()
     }
+  }
+
+  /* enter and exit run under the backend's own lock (plan refinement D2 of M3d) */
+  private def guarded[A](body: => A): A = {
+    lock.lock()
+    try body
+    finally lock.unlock()
   }
 
   private def queue(f: WriterState => (WriterState, String)): Unit =
@@ -272,7 +291,7 @@ object AnsiBackend {
   final case class InlineGeometry(viewport: Rect, terminal: Size)
 
   /** The backend's state: the writer state, the output queued since the last flush, the last non-zero size, whether `enter`
-    * succeeded, the entered screen mode, and the inline geometry.
+    * succeeded, the entered screen mode, the inline geometry, and the kitty keyboard flags pushed at entry (popped at exit, M3d).
     */
   final case class State(
     writer: WriterState,
@@ -281,6 +300,7 @@ object AnsiBackend {
     entered: Boolean,
     mode: Option[ScreenMode],
     inline: Option[InlineGeometry],
+    keyboard: KittyFlags,
   )
 
   /** The size assumed before the device reports one. */
@@ -306,8 +326,9 @@ object AnsiBackend {
       policy,
       entryRow,
       new AtomicReference(
-        State(WriterState.initial, Vector.empty[String], fallbackSize, false, none[ScreenMode], none[InlineGeometry])
+        State(WriterState.initial, Vector.empty[String], fallbackSize, false, none[ScreenMode], none[InlineGeometry], KittyFlags.none)
       ),
+      new ReentrantLock(),
     )
 
   extension (backend: AnsiBackend) {
@@ -320,6 +341,9 @@ object AnsiBackend {
 
     /** The inline geometry, for tests, `None` on the alternate screen. */
     def inlineGeometry: Option[InlineGeometry] = backend.ref.get().inline
+
+    /** The kitty keyboard flags pushed at entry and not yet popped, for tests. */
+    def pushedKeyboard: KittyFlags = backend.ref.get().keyboard
 
   }
 

@@ -7,11 +7,12 @@ import refined4s.types.numeric.{NonNegInt, PosInt}
 import stui.core.buffer.Buffer
 import stui.core.capability.Capabilities
 import stui.core.geometry.{Position, Rect, Size}
-import stui.core.spi.{ScreenMode, TerminalError, TerminalFeature, TerminalOptions}
+import stui.core.spi.{KeyboardProtocol, ScreenMode, TerminalError, TerminalFeature, TerminalOptions}
 import stui.testkit.Assertions
 import stui.terminal.AnsiBackend.*
 import stui.terminal.FakeTty.*
 import stui.terminal.ansi.{AnsiWriter, Sequences, WriterState}
+import stui.terminal.kitty.KittyFlags
 
 import java.nio.charset.StandardCharsets
 
@@ -46,14 +47,75 @@ object AnsiBackendSpec extends Properties {
     example("exit writes the safe reset once and discards queued output", testExit),
     example("the size falls back to the last report and to 80x24", testSize),
     example("the cursor and print operations queue their sequences", testQueued),
+    example("a kitty-capable terminal gets one push on entry and one pop across two exits", testKittyPushPop),
+    example("the Disabled policy pushes nothing on a kitty-capable terminal", testKittyDisabled),
+    example("KeyReleaseEvents pushes the event-type and alternate-key flags", testKittyReleases),
+    example("the inline exit pops what the inline entry pushed", testKittyInline),
   )
+
+  private val kittyCapabilities: Capabilities = Capabilities.lossless.copy(kittyKeyboard = true)
+
+  def testKittyPushPop: Result = {
+    val tty     = FakeTty.of(sized(5, 1))
+    val backend = AnsiBackend(tty, kittyCapabilities)
+    val entered = backend.enter(options)
+    val pushed  = backend.pushedKeyboard
+    backend.exit()
+    backend.exit()
+    Result.all(
+      List(
+        Assertions.eqv(entered, ().asRight[TerminalError]),
+        Assertions.eqv(pushed, KittyFlags.Disambiguate),
+        Assertions.eqv(backend.pushedKeyboard, KittyFlags.none),
+        Assertions.eqv(tty.output, Sequences.enter(options, KittyFlags.Disambiguate) + AnsiWriter.exit(KittyFlags.Disambiguate)),
+        tty.restoredCount ==== 1,
+      )
+    )
+  }
+
+  def testKittyDisabled: Result = {
+    val tty      = FakeTty.of(sized(5, 1))
+    val backend  = AnsiBackend(tty, kittyCapabilities)
+    val disabled = options.withKeyboard(KeyboardProtocol.Disabled)
+    backend.enter(disabled): Unit
+    backend.exit()
+    Assertions.eqv(tty.output, Sequences.enter(disabled, KittyFlags.none) + Sequences.SafeReset)
+  }
+
+  def testKittyReleases: Result = {
+    val tty     = FakeTty.of(sized(5, 1))
+    val backend = AnsiBackend(tty, kittyCapabilities)
+    backend.enter(options.withFeature(TerminalFeature.KeyReleaseEvents)): Unit
+    Assertions.eqv(backend.pushedKeyboard, KittyFlags.fromInt(7))
+  }
+
+  def testKittyInline: Result = {
+    val tty     = FakeTty.of(sized(8, 6))
+    val backend = inlineBackend(tty, kittyCapabilities, Some(5))
+    backend.enter(inlineOptions): Unit
+    val entry   = tty.output
+    backend.exit()
+    Result.all(
+      List(
+        Result.assert(entry.contains(Sequences.Csi + ">1u")).log(entry),
+        Assertions.eqv(
+          tty.output,
+          entry + AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3)), KittyFlags.Disambiguate),
+        ),
+      )
+    )
+  }
 
   def testEnter: Result = {
     val tty     = FakeTty.of(sized(5, 1))
     val backend = AnsiBackend(tty, capabilities)
     val result  = backend.enter(options)
     Result.all(
-      List(Assertions.eqv(result, ().asRight[TerminalError]), Assertions.eqv(tty.output, Sequences.enter(options)), tty.enteredCount ==== 1)
+      List(
+        Assertions.eqv(result, ().asRight[TerminalError]),
+        Assertions.eqv(tty.output, Sequences.enter(options, KittyFlags.none)),
+        tty.enteredCount ==== 1,
+      )
     )
   }
 
@@ -174,7 +236,8 @@ object AnsiBackendSpec extends Properties {
     backend.exit()
     Result.all(
       List(
-        Assertions.eqv(tty.output, entry + AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3)))),
+        Assertions
+          .eqv(tty.output, entry + AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3)), KittyFlags.none)),
         tty.restoredCount ==== 1,
       )
     )
@@ -245,7 +308,7 @@ object AnsiBackendSpec extends Properties {
     Result.all(
       List(
         Assertions.eqv(entered, ().asRight[TerminalError]),
-        Assertions.eqv(tty.output, Sequences.enter(options) + Sequences.SafeReset),
+        Assertions.eqv(tty.output, Sequences.enter(options, KittyFlags.none) + Sequences.SafeReset),
         tty.restoredCount ==== 1,
         Assertions.eqv(backend.pendingOutput, ""),
         Assertions.eqv(backend.writerState, WriterState.initial),

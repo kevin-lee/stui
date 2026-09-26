@@ -8,6 +8,7 @@ import stui.core.geometry.{Position, Rect, Size}
 import stui.core.internal.NonNegInts
 import stui.core.spi.TerminalOptions
 import stui.core.style.CellStyle
+import stui.terminal.kitty.KittyFlags
 import stui.unicode.Graphemes
 import stui.unicode.internal.IntOps.*
 
@@ -116,32 +117,38 @@ object AnsiWriter {
       Sequences.cup(viewport.y.value + 1, viewport.x.value + 1) + Sequences.EraseBelow,
     )
 
-  /** The entry sequence of [[Sequences.enter]] and the initial state with the cursor known at the origin (the sequence homes it). */
-  def enter(options: TerminalOptions): (WriterState, String) =
-    (WriterState.initial.copy(cursor = CursorState.Known(Position.origin)), Sequences.enter(options))
+  /** The entry sequence of [[Sequences.enter]] with the kitty keyboard push of `flags`, and the initial state with the cursor known at
+    * the origin (the sequence homes it).
+    */
+  def enter(options: TerminalOptions, flags: KittyFlags): (WriterState, String) =
+    (WriterState.initial.copy(cursor = CursorState.Known(Position.origin)), Sequences.enter(options, flags))
 
   /** The inline entry (design doc 7.2, never a full-screen clear): a carriage return to column 1, `pad` line feeds (the entry
-    * scroll), the cursor hidden, the features, and the region armed through the DECSC / DECRC bracket when the scroll-region
-    * strategy applies (rule R7). The tracked cursor is unknown afterwards.
+    * scroll), the cursor hidden, the features, the kitty keyboard push of `flags` (M3d), and the region armed through the DECSC /
+    * DECRC bracket when the scroll-region strategy applies (rule R7). The tracked cursor is unknown afterwards.
     */
-  def enterInline(options: TerminalOptions, pad: Int, region: Option[ScrollRegion]): (WriterState, String) = {
+  def enterInline(options: TerminalOptions, pad: Int, region: Option[ScrollRegion], flags: KittyFlags): (WriterState, String) = {
     val armed = region.fold("")(r => Sequences.armRegion(r.top.value + 1, r.bottom.value + 1))
     (
       WriterState(CursorState.Unknown, CellStyle.default, region),
-      Sequences.Cr + (Sequences.Lf * pad) + Sequences.CursorHide + Sequences.features(options) + armed,
+      Sequences.Cr + (Sequences.Lf * pad) + Sequences.CursorHide + Sequences.features(options) + Sequences.kittyPush(flags) + armed,
     )
   }
 
-  /** The fixed reset of every alternate-screen exit path, [[Sequences.SafeReset]]. */
-  val exit: String = Sequences.SafeReset
+  /** The reset of every alternate-screen exit path, the reset of what was entered (rule R6): the kitty keyboard pop of the pushed
+    * `flags` (before mode 1049 is reset, the alternate screen's own stack, M3d), then [[Sequences.SafeReset]].
+    */
+  def exit(flags: KittyFlags): String = Sequences.kittyPop(flags) + Sequences.SafeReset
 
-  /** The fixed reset of every inline exit path (design doc 7.2): the feature modes off in reverse order, the style reset, the cursor
-    * shown, the region reset through the DECSC / DECRC bracket (rule R7), and the cursor parked at column 1 of the row below the
+  /** The reset of every inline exit path (design doc 7.2): the kitty keyboard pop of the pushed `flags` (M3d), the feature modes off
+    * in reverse order, the style reset, the cursor shown, the region reset through the DECSC / DECRC bracket (rule R7), and the cursor parked at column 1 of the row below the
     * viewport (a CR LF from the viewport's last row, which scrolls one line when the viewport touches the terminal bottom, leaving
     * the last frame visible as history). Never `CSI ? 1049 l` (mode 1049 reset restores the cursor as DECRC on the normal screen).
     */
-  def exitInline(viewport: Rect): String =
-    Sequences.FocusDisable + Sequences.BracketedPasteDisable + Sequences.MouseTrackingDisable + Sequences.SgrReset +
+  def exitInline(viewport: Rect, flags: KittyFlags): String =
+    Sequences.kittyPop(
+      flags
+    ) + Sequences.FocusDisable + Sequences.BracketedPasteDisable + Sequences.MouseTrackingDisable + Sequences.SgrReset +
       Sequences.CursorShow + Sequences.resetRegion + Sequences.cup(viewport.y.value + viewport.height.value, 1) + Sequences.CrLf
 
   /** The rows as styled lines at the cursor (the transcript flush after restore, design doc 7.2): each row's cells up to the last
