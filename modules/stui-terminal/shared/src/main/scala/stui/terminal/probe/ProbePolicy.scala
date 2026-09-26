@@ -16,8 +16,9 @@ object ProbePolicy {
   private val ExtendedUnderlineIdentities: Set[String] = Set("kitty", "foot", "wezterm", "ghostty", "contour", "iterm2")
 
   /** The patch the result justifies over the environment value: the DECRPM 2026 answer sets `syncOutput`, a truecolour XTGETTCAP
-    * answer or a known XTVERSION identity sets `colors` (unless the base is `Mono`), a known identity sets `extendedUnderline`, and
-    * [[MultiplexerPolicy.restrict]] drops what the base's multiplexer forbids.
+    * answer or a known XTVERSION identity sets `colors` (unless the base is `Mono`), a known identity sets `extendedUnderline`, the
+    * kitty keyboard flags answer sets `kittyKeyboard` (M3d), and [[MultiplexerPolicy.restrict]] drops what the base's multiplexer
+    * forbids.
     */
   def patch(base: Capabilities, result: ProbeResult): CapabilitiesPatch = {
     val sync      = result.syncOutputAnswer.fold(CapabilitiesPatch.empty)(CapabilitiesPatch.empty.withSyncOutput)
@@ -32,7 +33,9 @@ object ProbePolicy {
     val underline =
       if (identity.exists(ExtendedUnderlineIdentities.contains)) CapabilitiesPatch.empty.withExtendedUnderline(true)
       else CapabilitiesPatch.empty
-    MultiplexerPolicy.restrict(base.multiplexer, sync |+| truecolor |+| underline)
+    val kitty     =
+      if (result.kittyKeyboardAnswered) CapabilitiesPatch.empty.withKittyKeyboard(true) else CapabilitiesPatch.empty
+    MultiplexerPolicy.restrict(base.multiplexer, sync |+| truecolor |+| underline |+| kitty)
   }
 
 }

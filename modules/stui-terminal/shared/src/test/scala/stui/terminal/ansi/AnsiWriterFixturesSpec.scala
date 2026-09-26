@@ -8,6 +8,7 @@ import stui.core.capability.{Capabilities, ColorProfile}
 import stui.core.geometry.{Position, Rect, Size}
 import stui.core.spi.{ScreenMode, TerminalFeature, TerminalOptions}
 import stui.core.style.{CellStyle, Color, Style}
+import stui.terminal.kitty.KittyFlags
 import stui.testkit.Assertions
 import stui.testkit.gen.NastyGens
 
@@ -121,7 +122,7 @@ object AnsiWriterFixturesSpec extends Properties {
   def testEnterInline: Result = {
     val options = TerminalOptions.of(ScreenMode.Inline(refined4s.types.numeric.PosInt(3)))
     val region  = ScrollRegion(NonNegInt(0), NonNegInt(1))
-    AnsiWriter.enterInline(options, 2, Some(region)) match {
+    AnsiWriter.enterInline(options, 2, Some(region), KittyFlags.none) match {
       case (state, output) =>
         Result.all(
           List(
@@ -129,8 +130,12 @@ object AnsiWriterFixturesSpec extends Properties {
             Assertions.eqv(state.cursor, (CursorState.Unknown: CursorState)),
             Assertions.eqv(state.region, Some(region)),
             Assertions.eqv(
-              AnsiWriter.enterInline(options, 0, None)._2,
+              AnsiWriter.enterInline(options, 0, None, KittyFlags.none)._2,
               Sequences.Cr + Sequences.CursorHide,
+            ),
+            Assertions.eqv(
+              AnsiWriter.enterInline(options, 0, None, KittyFlags.Disambiguate)._2,
+              Sequences.Cr + Sequences.CursorHide + Sequences.Csi + ">1u",
             ),
           )
         )
@@ -139,7 +144,7 @@ object AnsiWriterFixturesSpec extends Properties {
 
   def testExitInline: Result =
     Assertions.eqv(
-      AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3))),
+      AnsiWriter.exitInline(Rect(NonNegInt(0), NonNegInt(3), NonNegInt(8), NonNegInt(3)), KittyFlags.none),
       Sequences.FocusDisable + Sequences.BracketedPasteDisable + Sequences.MouseTrackingDisable + Sequences.SgrReset +
         Sequences.CursorShow + Sequences.resetRegion + cup(6, 1) + Sequences.CrLf,
     )
@@ -273,13 +278,13 @@ object AnsiWriterFixturesSpec extends Properties {
 
   def testEnterExit: Result = {
     val options = TerminalOptions.of(ScreenMode.AlternateScreen, TerminalFeature.MouseCapture)
-    AnsiWriter.enter(options) match {
+    AnsiWriter.enter(options, KittyFlags.none) match {
       case (state, output) =>
         Result.all(
           List(
-            Assertions.eqv(output, Sequences.enter(options)),
+            Assertions.eqv(output, Sequences.enter(options, KittyFlags.none)),
             Assertions.eqv(state.cursor, CursorState.Known(Position.origin)),
-            Assertions.eqv(AnsiWriter.exit, Sequences.SafeReset),
+            Assertions.eqv(AnsiWriter.exit(KittyFlags.none), Sequences.SafeReset),
             Assertions.eqv(AnsiWriter.clearAll(state)._2, Sequences.ClearScreen + Sequences.CursorHome),
             Assertions.eqv(AnsiWriter.hideCursor(state)._2, Sequences.CursorHide),
             Assertions.eqv(AnsiWriter.showCursor(state)._2, Sequences.CursorShow),

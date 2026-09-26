@@ -9,6 +9,7 @@ import stui.core.event.{Event, KeyCode, KeyEvent, KeyModifier, KeyModifiers}
 import stui.core.geometry.Size
 import stui.core.spi.{EscTimeout, Probing, TerminalOptions}
 import stui.terminal.decoder.{Decoder, DecoderGens, DecoderInput, DecoderState, Encoder, Reply}
+import stui.terminal.kitty.KittyFlags
 import stui.terminal.probe.ProbeResult
 import stui.terminal.probe.ProbeResult.*
 import stui.testkit.{Assertions, ManualClock, ManualScheduler, SlowLink}
@@ -25,7 +26,8 @@ import scala.concurrent.duration.*
 /** The blocking event source and the probe under ssh-like timing through the slow link (design doc 7.5 and 12, M3c): the split arrow
   * key under both ESC timeouts, the probe over a split reply inside and past its deadline, and the timing laws - gaps below the
   * timeout leave the events equal to the unsplit decoding, a gap above it after a lone ESC yields Escape first, and the blocking and
-  * the push source decode the same timeline identically.
+  * the push source decode the same timeline identically, and under the kitty disambiguate flag (M3d) the split Escape report, the
+  * stalled lone ESC, and the two sources agreeing over kitty scripts.
   *
   * @author Kevin Lee
   * @since 2026-09-06
@@ -50,7 +52,12 @@ object SlowLinkDecodingSpec extends Properties {
   /** The split arrow key: a lone ESC, then `[A` 150 ms later. */
   private val splitArrow: Timeline = Timeline.of(arrival(Duration.Zero, esc), arrival(150.millis, "[A"))
 
-  private def source(player: SlowLink.PullPlayer, clock: ManualClock, escTimeout: FiniteDuration): DecodingEventSource =
+  private def sourceIn(
+    state: DecoderState,
+    player: SlowLink.PullPlayer,
+    clock: ManualClock,
+    escTimeout: FiniteDuration,
+  ): DecodingEventSource =
     new DecodingEventSource(
       (timeout: FiniteDuration) => player.poll(timeout),
       new AtomicBoolean(false),
@@ -58,7 +65,7 @@ object SlowLinkDecodingSpec extends Properties {
       (size: Size) => size,
       escTimeout,
       clock,
-      DecoderState.initial,
+      state,
       Vector.empty[Event],
     )
 
@@ -69,15 +76,21 @@ object SlowLinkDecodingSpec extends Properties {
       case None => if (clock.now >= until) acc else drain(events, clock, until, acc)
     }
 
-  private def blockingEvents(timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] = {
+  private def blockingEvents(timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] =
+    blockingEventsIn(DecoderState.initial, timeline, escTimeout)
+
+  private def blockingEventsIn(state: DecoderState, timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] = {
     val clock = ManualClock.of(0.millis)
-    drain(source(SlowLink.pull(timeline, clock), clock, escTimeout), clock, timeline.end + escTimeout * 2L, Vector.empty[Event])
+    drain(sourceIn(state, SlowLink.pull(timeline, clock), clock, escTimeout), clock, timeline.end + escTimeout * 2L, Vector.empty[Event])
   }
 
-  private def pushEvents(timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] = {
+  private def pushEvents(timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] =
+    pushEventsIn(DecoderState.initial, timeline, escTimeout)
+
+  private def pushEventsIn(state: DecoderState, timeline: Timeline, escTimeout: FiniteDuration): Vector[Event] = {
     val scheduler = ManualScheduler.of(0.millis)
     val events    =
-      new PushEventSource((size: Size) => size, escTimeout, Schedules.of(scheduler), DecoderState.initial, Vector.empty[Event], none[Size])
+      new PushEventSource((size: Size) => size, escTimeout, Schedules.of(scheduler), state, Vector.empty[Event], none[Size])
     val seen      = new AtomicReference(Vector.empty[Event])
     events.subscribe(event => seen.updateAndGet(_ :+ event): Unit): Unit
     SlowLink.push(timeline, scheduler, events.onChunk): Unit
@@ -120,7 +133,41 @@ object SlowLinkDecodingSpec extends Properties {
     property("gaps below the ESC timeout leave the events equal to the unsplit decoding on the blocking source", testBelowTimeout),
     property("a gap above the timeout after a lone ESC yields Escape first", testEscapeFirst),
     property("the blocking and the push source decode the same timeline identically", testBothSources),
+    example("under flag 1 an Escape report split 150 ms after its ESC stays one Escape", testKittySplitEscape),
+    example("under flag 1 a lone ESC followed by a 250 ms later gives only a", testKittyStall),
+    property("under flag 1 the blocking and the push source decode kitty scripts identically", testKittyBothSources),
   )
+
+  private val k1: DecoderState = DecoderState.initial.withKeyboard(KittyFlags.Disambiguate)
+
+  /** The stall timeout under flag 1 (`KittyKeyboard.escTimeout` gives the ssh default there). */
+  private val stall: FiniteDuration = EscTimeout.sshDefault
+
+  private val kittyScript: Gen[IArray[Byte]] =
+    DecoderGens
+      .kittyEncodable(KittyFlags.Disambiguate)
+      .list(Range.linear(1, 5))
+      .map(events =>
+        IArray.from(events.flatMap(event => Encoder.encodeKitty(KittyFlags.Disambiguate, event).fold(Vector.empty[Byte])(_.toVector)))
+      )
+
+  def testKittySplitEscape: Result =
+    Assertions.eqv(
+      blockingEventsIn(k1, Timeline.of(arrival(Duration.Zero, esc), arrival(150.millis, "[27u")), stall),
+      Vector(key(KeyCode.Escape)),
+    )
+
+  def testKittyStall: Result =
+    Assertions.eqv(
+      blockingEventsIn(k1, Timeline.of(arrival(Duration.Zero, esc), arrival(250.millis, "a")), stall),
+      Vector(key(KeyCode.Char('a'))),
+    )
+
+  def testKittyBothSources: Property =
+    for {
+      bytes    <- kittyScript.forAll
+      timeline <- SlowLinkGens.timeline(bytes, 250.millis).forAll
+    } yield Assertions.eqv(blockingEventsIn(k1, timeline, stall), pushEventsIn(k1, timeline, stall))
 
   def testSshTimeout: Result = Assertions.eqv(blockingEvents(splitArrow, EscTimeout.sshDefault), Vector(key(KeyCode.Up)))
 

@@ -66,7 +66,7 @@ object SpiSpec extends Properties {
     example("ScreenMode.inlineFrom rejects 0 and accepts 5", testInlineFrom),
     example("EscTimeout resolves 50 ms locally, 200 ms over ssh, and a fixed value as given", testEscTimeout),
     example("Probing resolves 100 ms locally, 1 s over ssh, a fixed value, and nothing when disabled", testProbing),
-    example("TerminalOptions carries the print bound and the probing policy", testPrintOptions),
+    example("TerminalOptions carries the print bound, the probing policy, and the keyboard policy", testPrintOptions),
   )
 
   def testDraw: Result = {
@@ -141,6 +141,11 @@ object SpiSpec extends Properties {
         Assertions.eqv(TerminalOptions.alternateScreen.probing, (Probing.Automatic: Probing)),
         Assertions.eqv(TerminalOptions.alternateScreen.withPrintBufferRows(PosInt(10)).printBufferRows, PosInt(10)),
         Assertions.eqv(TerminalOptions.alternateScreen.withProbing(Probing.Disabled).probing, (Probing.Disabled: Probing)),
+        Assertions.eqv(TerminalOptions.alternateScreen.keyboard, (KeyboardProtocol.Automatic: KeyboardProtocol)),
+        Assertions.eqv(
+          TerminalOptions.alternateScreen.withKeyboard(KeyboardProtocol.Disabled).keyboard,
+          (KeyboardProtocol.Disabled: KeyboardProtocol),
+        ),
       )
     )
 

@@ -1,6 +1,7 @@
 package stui.terminal.ansi
 
 import stui.core.spi.{TerminalFeature, TerminalOptions}
+import stui.terminal.kitty.KittyFlags
 
 /** The fixed control sequences the writer owns (design doc 7.1 and principle 9), in xterm ctlseqs notation. Everything the terminal
   * receives is either one of these or a glyph from a cell.
@@ -113,20 +114,29 @@ object Sequences {
   /** Erase in Line from the cursor to the end of the row (EL 0), emitted after every printed row so a short row leaves no residue. */
   val EraseToLineEnd: String = Csi + "K"
 
-  /** The fixed reset every exit path emits, crash and signal paths included (rule R6): every optional mode off in reverse order, the
-    * style reset, the cursor shown, and the normal screen restored. Disabling a mode that was never enabled is harmless, so one
-    * sequence serves every feature set.
+  /** The fixed part of the reset every exit path emits, crash and signal paths included (rule R6): every optional mode off in reverse
+    * order, the style reset, the cursor shown, and the normal screen restored. Disabling a mode that was never enabled is harmless, so
+    * this part serves every feature set. A kitty keyboard pop is not harmless without its push (it removes another program's entry),
+    * so the exits add [[kittyPop]] of exactly what was pushed (M3d).
     */
   val SafeReset: String = FocusDisable + BracketedPasteDisable + MouseTrackingDisable + SgrReset + CursorShow + AlternateScreenExit
 
+  /** The kitty keyboard push `CSI > flags u` (the kitty keyboard protocol specification, M3d), nothing for no flags. */
+  def kittyPush(flags: KittyFlags): String = if (flags.isEmpty) "" else Csi + ">" + flags.bits.toString + "u"
+
+  /** The kitty keyboard pop `CSI < u` of one pushed entry, nothing when no flags were pushed. */
+  def kittyPop(flags: KittyFlags): String = if (flags.isEmpty) "" else Csi + "<u"
+
   /** The entry sequence for the options: the alternate screen, an explicit clear and home (fact 13 of the comparison report: a
-    * terminal may not clear on mode 1049), the cursor hidden, then the enabled features in order (mouse with the hygiene reset first,
-    * bracketed paste, focus). `KeyReleaseEvents` adds nothing until the kitty keyboard protocol (M3).
+    * terminal may not clear on mode 1049), the cursor hidden, the enabled features in order (mouse with the hygiene reset first,
+    * bracketed paste, focus), then the kitty keyboard push of `flags` (after mode 1049, because the main and alternate screens keep
+    * separate stacks, M3d).
     */
-  def enter(options: TerminalOptions): String = AlternateScreenEnter + ClearScreen + CursorHome + CursorHide + features(options)
+  def enter(options: TerminalOptions, flags: KittyFlags): String =
+    AlternateScreenEnter + ClearScreen + CursorHome + CursorHide + features(options) + kittyPush(flags)
 
   /** The feature part of an entry sequence, in order: mouse (with the hygiene reset first), bracketed paste, focus.
-    * `KeyReleaseEvents` adds nothing until the kitty keyboard protocol (M3).
+    * `KeyReleaseEvents` is not a mode: it selects the kitty keyboard flags (`KittyKeyboard.flagsFor`, M3d).
     */
   def features(options: TerminalOptions): String = {
     val mouse = if (options.enabled(TerminalFeature.MouseCapture)) MouseHygieneReset + MouseTrackingEnable else ""

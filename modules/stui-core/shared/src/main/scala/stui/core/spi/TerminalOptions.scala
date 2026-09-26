@@ -4,10 +4,10 @@ import cats.{Eq, Hash, Show}
 import cats.derived.strict.*
 import refined4s.types.numeric.PosInt
 
-/** What to enter: the screen mode, the optional features, the ESC timeout policy, the print-ring bound, and the probing policy
-  * (design doc 6.3, 7.2, 7.3, decisions D12, D13, D15). Raw mode is always entered. `printBufferRows` bounds the transcript kept
-  * under the alternate screen (rows, oldest prints dropped first), `probing` says whether the startup probe runs and how long it
-  * waits.
+/** What to enter: the screen mode, the optional features, the ESC timeout policy, the print-ring bound, the probing policy, and the
+  * kitty keyboard protocol policy (design doc 6.3, 7.2, 7.3, 7.5, decisions D12, D13, D15, D30). Raw mode is always entered.
+  * `printBufferRows` bounds the transcript kept under the alternate screen (rows, oldest prints dropped first), `probing` says whether
+  * the startup probe runs and how long it waits, and `keyboard` whether the kitty keyboard protocol is pushed when supported.
   *
   * @author Kevin Lee
   * @since 2026-08-23
@@ -18,6 +18,7 @@ final case class TerminalOptions(
   escTimeout: EscTimeout,
   printBufferRows: PosInt,
   probing: Probing,
+  keyboard: KeyboardProtocol,
 ) derives Eq,
       Show,
       Hash
@@ -27,15 +28,31 @@ object TerminalOptions {
   /** The default bound of the print ring under the alternate screen, in rows (design doc 7.2, decision D13). */
   val defaultPrintBufferRows: PosInt = PosInt(1000)
 
-  /** The alternate screen with no optional feature, the automatic ESC timeout, the default print bound, and automatic probing. */
+  /** The alternate screen with no optional feature, the automatic ESC timeout, the default print bound, automatic probing, and the
+    * automatic kitty keyboard protocol.
+    */
   val alternateScreen: TerminalOptions =
-    TerminalOptions(ScreenMode.AlternateScreen, Set.empty[TerminalFeature], EscTimeout.Automatic, defaultPrintBufferRows, Probing.Automatic)
+    TerminalOptions(
+      ScreenMode.AlternateScreen,
+      Set.empty[TerminalFeature],
+      EscTimeout.Automatic,
+      defaultPrintBufferRows,
+      Probing.Automatic,
+      KeyboardProtocol.Automatic,
+    )
 
   /** The options for the screen mode enabling exactly the given features, with the automatic ESC timeout, the default print bound,
-    * and automatic probing.
+    * automatic probing, and the automatic kitty keyboard protocol.
     */
   def of(screenMode: ScreenMode, features: TerminalFeature*): TerminalOptions =
-    TerminalOptions(screenMode, features.toSet, EscTimeout.Automatic, defaultPrintBufferRows, Probing.Automatic)
+    TerminalOptions(
+      screenMode,
+      features.toSet,
+      EscTimeout.Automatic,
+      defaultPrintBufferRows,
+      Probing.Automatic,
+      KeyboardProtocol.Automatic,
+    )
 
   extension (options: TerminalOptions) {
 
@@ -59,6 +76,9 @@ object TerminalOptions {
 
     /** The options with the probing policy replaced. */
     def withProbing(probing: Probing): TerminalOptions = options.copy(probing = probing)
+
+    /** The options with the kitty keyboard protocol policy replaced (M3d). */
+    def withKeyboard(keyboard: KeyboardProtocol): TerminalOptions = options.copy(keyboard = keyboard)
 
   }
 

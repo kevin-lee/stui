@@ -5,6 +5,7 @@ import stui.core.capability.{Capabilities, CapabilitiesPatch}
 import stui.core.spi.{Clock, TerminalError, TerminalOptions}
 import stui.core.terminal.Terminal
 import stui.terminal.internal.{JvmSignals, JvmTty, StdinReader}
+import stui.terminal.kitty.KittyKeyboard
 import stui.terminal.probe.ProbePolicy
 
 import java.util.concurrent.atomic.AtomicReference
@@ -13,7 +14,9 @@ import scala.util.Try
 /** The JVM entry point (design doc 7, 7.3, and 7.4): capabilities from the environment, raw mode, the startup probe (D15: one round
   * trip ended by the DA1 sentinel, fail-open), the three-layer capabilities merge, the JNA device, the shared ANSI backend anchored at
   * the probed cursor row, the WINCH handler, a shutdown hook that closes the terminal under its lock (the M0-verified SIGTERM path,
-  * the JVM exits 143 on its own), and the decoding event source continuing from the probe's decoder state.
+  * the JVM exits 143 on its own) or, before the terminal exists, exits the backend under the backend's own lock (so a signal during
+  * the entry still pops the kitty keyboard push, M3d), and the decoding event source continuing from the probe's decoder state with
+  * the pushed kitty flags and the stall-aware ESC timeout.
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -43,8 +46,9 @@ object PlatformTerminal {
           val probe        = Probe.run(tty, StdinReader.input, options, envCaps, Clock.system)
           val capabilities = Capabilities.merge(envCaps, ProbePolicy.patch(envCaps, probe), overrides)
           val backend      = AnsiBackend.withEntryRow(tty, capabilities, probe.cursorRow)
+          val keyboard     = KittyKeyboard.flagsFor(options, capabilities)
           val ref          = new AtomicReference(none[Terminal])
-          val hook         = new Thread(() => ref.get().foreach(_.close()), "stui-restore")
+          val hook         = new Thread(() => ref.get().fold(backend.exit())(_.close()), "stui-restore")
           JvmSignals.installWinch()
           Runtime.getRuntime.addShutdownHook(hook)
           try
@@ -55,9 +59,9 @@ object PlatformTerminal {
                 JvmSignals.resized,
                 () => tty.size(),
                 EffectiveSize.of(options),
-                options.escTimeout.resolve(capabilities.ssh),
+                KittyKeyboard.escTimeout(options.escTimeout.resolve(capabilities.ssh), keyboard),
                 Clock.system,
-                probe.decoder,
+                probe.decoder.withKeyboard(keyboard),
                 probe.events,
               )
               use(new TerminalSession(terminal, events, capabilities, () => false))

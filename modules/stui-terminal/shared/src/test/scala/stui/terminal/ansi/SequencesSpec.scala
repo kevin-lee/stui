@@ -7,6 +7,7 @@ import refined4s.types.numeric.NonNegInt
 import stui.core.buffer.Buffer
 import stui.core.geometry.Size
 import stui.core.spi.{ScreenMode, TerminalFeature, TerminalOptions}
+import stui.terminal.kitty.KittyFlags
 import stui.testkit.{Assertions, TerminalModel}
 import stui.testkit.TerminalModel.{QuirkProfile, Screen}
 
@@ -64,14 +65,86 @@ object SequencesSpec extends Properties {
         )
       ),
     ),
+    example("the kitty push and pop literals, and the conditional pop in the exit", testKittyLiterals),
+    example("the kitty push follows the alternate-screen entry", testKittyEnterOrder),
+    example("the push lands on the alternate stack and the exit pops it", testKittyAlternateStacks),
+    example("the inline entry pushes and the inline exit pops the normal stack", testKittyInlineStacks),
     example(
       "no feature adds only the screen part",
       Assertions.eqv(
-        Sequences.enter(TerminalOptions.alternateScreen),
+        Sequences.enter(TerminalOptions.alternateScreen, KittyFlags.none),
         Sequences.AlternateScreenEnter + Sequences.ClearScreen + Sequences.CursorHome + Sequences.CursorHide,
       ),
     ),
   )
+
+  private val k1: KittyFlags = KittyFlags.Disambiguate
+
+  def testKittyLiterals: Result =
+    Result.all(
+      List(
+        Assertions.eqv(Sequences.kittyPush(k1), Sequences.Csi + ">1u"),
+        Assertions.eqv(Sequences.kittyPush(KittyFlags.fromInt(7)), Sequences.Csi + ">7u"),
+        Assertions.eqv(Sequences.kittyPop(k1), Sequences.Csi + "<u"),
+        Assertions.eqv(Sequences.kittyPush(KittyFlags.none), ""),
+        Assertions.eqv(Sequences.kittyPop(KittyFlags.none), ""),
+        Assertions.eqv(AnsiWriter.exit(KittyFlags.none), Sequences.SafeReset),
+        Result.assert(AnsiWriter.exit(k1).startsWith(Sequences.Csi + "<u")).log(AnsiWriter.exit(k1)),
+      )
+    )
+
+  def testKittyEnterOrder: Result = {
+    val entry = Sequences.enter(everything, k1)
+    Result.all(
+      List(
+        Result.assert(entry.endsWith(Sequences.Csi + ">1u")).log(entry),
+        Result.assert(entry.indexOf(Sequences.AlternateScreenEnter) < entry.indexOf(Sequences.Csi + ">1u")).log(entry),
+      )
+    )
+  }
+
+  def testKittyAlternateStacks: Result =
+    TerminalModel.interpret(QuirkProfile.default, garbage(QuirkProfile.default), Sequences.enter(everything, k1)) match {
+      case Right(entered) =>
+        TerminalModel.interpret(QuirkProfile.default, entered, AnsiWriter.exit(k1)) match {
+          case Right(exited) =>
+            Result.all(
+              List(
+                Assertions.eqv(entered.keyboardAlternate, List(1)),
+                Assertions.eqv(entered.keyboardMain, List.empty[Int]),
+                Assertions.eqv(exited.keyboardAlternate, List.empty[Int]),
+                Assertions.eqv(exited.keyboardMain, List.empty[Int]),
+                Result.assert(!exited.alternate).log("normal screen"),
+              )
+            )
+          case Left(error) => Result.failure.log(error.show)
+        }
+      case Left(error) => Result.failure.log(error.show)
+    }
+
+  def testKittyInlineStacks: Result = {
+    val options  = TerminalOptions.of(ScreenMode.Inline(refined4s.types.numeric.PosInt(3)))
+    val viewport = stui.core.geometry.Rect(NonNegInt(0), NonNegInt(3), NonNegInt(3), NonNegInt(3))
+    val blank    = Screen.blank(QuirkProfile.default, Size(NonNegInt(3), NonNegInt(6)))
+    TerminalModel.interpret(QuirkProfile.default, blank, AnsiWriter.enterInline(options, 0, None, k1)._2) match {
+      case Right(entered) =>
+        TerminalModel.interpret(
+          QuirkProfile.default,
+          entered.copy(cursor = stui.core.geometry.Position.origin),
+          AnsiWriter.exitInline(viewport, k1),
+        ) match {
+          case Right(exited) =>
+            Result.all(
+              List(
+                Assertions.eqv(entered.keyboardMain, List(1)),
+                Assertions.eqv(exited.keyboardMain, List.empty[Int]),
+              )
+            )
+          case Left(error) => Result.failure.log(error.show)
+        }
+      case Left(error) => Result.failure.log(error.show)
+    }
+  }
 
   private def garbage(profile: QuirkProfile): Screen =
     Screen
@@ -79,7 +152,7 @@ object SequencesSpec extends Properties {
       .copy(buffer = Buffer.fromLinesWith(TerminalModel.policyOf(profile), Vector("abc", "def")), cursorVisible = true)
 
   def testEnter(profile: QuirkProfile): Result =
-    TerminalModel.interpret(profile, garbage(profile), Sequences.enter(everything)) match {
+    TerminalModel.interpret(profile, garbage(profile), Sequences.enter(everything, KittyFlags.none)) match {
       case Right(screen) =>
         Result.all(
           List(
@@ -119,7 +192,7 @@ object SequencesSpec extends Properties {
         region = TerminalModel.Region(NonNegInt(0), NonNegInt(2)).some,
         style = stui.core.style.CellStyle.default.copy(fg = stui.core.style.Color.Red),
       )
-    TerminalModel.interpret(QuirkProfile.default, entered, stui.terminal.ansi.AnsiWriter.exitInline(viewport)) match {
+    TerminalModel.interpret(QuirkProfile.default, entered, stui.terminal.ansi.AnsiWriter.exitInline(viewport, KittyFlags.none)) match {
       case Right(screen) =>
         Result.all(
           List(
@@ -136,7 +209,11 @@ object SequencesSpec extends Properties {
   }
 
   def testExit: Result =
-    TerminalModel.interpret(QuirkProfile.default, garbage(QuirkProfile.default), Sequences.enter(everything) + Sequences.SafeReset) match {
+    TerminalModel.interpret(
+      QuirkProfile.default,
+      garbage(QuirkProfile.default),
+      Sequences.enter(everything, KittyFlags.none) + Sequences.SafeReset,
+    ) match {
       case Right(screen) =>
         Result.all(
           List(

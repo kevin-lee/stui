@@ -5,6 +5,7 @@ import stui.core.event.*
 import stui.core.geometry.Position
 import stui.core.internal.NonNegInts
 import stui.terminal.decoder.DecoderMode.*
+import stui.terminal.kitty.KittyFlags
 import stui.unicode.internal.IntOps.*
 
 import java.nio.charset.StandardCharsets
@@ -16,8 +17,17 @@ import scala.annotation.tailrec
   *   - Keys: C0 bytes (`0x0d` and `0x0a` Enter, `0x09` Tab, `0x7f` and `0x08` Backspace, `0x00` Control+Space, `0x01`-`0x1a` Control
   *     plus a letter, `0x1c`-`0x1f` Control plus `4` to `7`), printable ASCII (`A` to `Z` carry Shift), UTF-8 characters (U+FFFD for an
   *     invalid or truncated sequence, an astral scalar as two surrogate `Char` events), `ESC` plus a key as Alt plus the key, xterm's
-  *     cursor, editing, and function keys in normal and application mode with the `1 + Shift 1 + Alt 2 + Control 4 + Meta 8` modifier
-  *     parameter, `CSI Z` as Shift+BackTab.
+  *     cursor, editing, and function keys in normal and application mode (Keypad Begin as `CSI E` and `SS3 E`), `CSI Z` as
+  *     Shift+BackTab. The modifier parameter is xterm's `1 + Shift 1 + Alt 2 + Control 4 + Meta 8`, or the kitty keyboard protocol's
+  *     `1 + Shift 1 + Alt 2 + Control 4 + Super 8 + Hyper 16 + Meta 32` (Caps Lock 64 and Num Lock 128 dropped) while
+  *     `DecoderState.keyboard` holds pushed flags, and its colon sub-field is the event kind (1 press, 2 repeat, 3 release).
+  *   - The kitty keyboard protocol (M3d, decision D30): `CSI code:shifted:base ; modifiers:kind ; text u` reports decode in every state,
+  *     always with the kitty modifier bits. A report carrying text decodes to exactly the events the same text gives as UTF-8 (so an
+  *     input-method commit on Enter is text, never an Enter press), with the report's kind. Otherwise 9 is Tab (BackTab with Shift), 13
+  *     Enter, 27 Escape, 127 Backspace, the Private Use Area keys map through [[KittyKeys]] (keypad keys to their plain equivalents),
+  *     a letter is uppercase with Shift exactly when Shift xor Caps Lock holds, another character with Shift is its shifted key (Shift
+  *     dropped) when the report names one, and unknown or control codes are dropped. Kinds are filtered: a release is dropped and a
+  *     repeat delivered as a press unless the pushed flags contain `EventTypes` (the Press-only default of design doc 6.2).
   *   - Mouse: SGR 1006 (`CSI < b ; x ; y M` or `m`), X10 (`CSI M` plus three bytes), and urxvt 1015 (`CSI b ; x ; y M`), with the
   *     button, motion, and wheel bits of xterm ctlseqs, 1-based coordinates made 0-based, and reports outside `1..MaxCoordinate` dropped.
   *   - Focus (`CSI I`, `CSI O`) and bracketed paste (`CSI 200 ~` to `CSI 201 ~`, the body decoded as UTF-8 with replacement).
@@ -25,10 +35,15 @@ import scala.annotation.tailrec
   *     answers (DCS strings, buffered up to `DecoderLimits.MaxStringSequence` and parsed at their terminator), and, only while
   *     `DecoderState.expectingReplies` holds, the Cursor Position Report (`CSI Pl ; Pc R`, F3 with modifiers otherwise, plan
   *     refinement R5).
-  *   - Consumed without an event or reply: OSC, APC, PM, and SOS strings to their terminator, kitty `CSI u` reports (M3), unknown
-  *     sequences, and charset designations.
+  *   - The kitty flags answer `CSI ? flags u` is always a reply. With flags pushed and no reply expected, `CSI ... R` is a late Cursor
+  *     Position Report and is dropped (kitty sends F3 as `CSI 13 ~`).
+  *   - Consumed without an event or reply: OSC, APC, PM, and SOS strings to their terminator, unknown sequences, and charset
+  *     designations.
   *   - A tick resolves a lone ESC as Escape, `ESC [` as Alt+`[`, `ESC O` as Alt+Shift+`O`, a partial sequence as Escape followed by
-  *     its bytes re-read as keys, an unfinished UTF-8 character as U+FFFD, and drops a partial string or X10 report.
+  *     its bytes re-read as keys, an unfinished UTF-8 character as U+FFFD, and drops a partial string or X10 report. While the pushed
+  *     flags contain `Disambiguate` no key starts with a bare ESC, so a tick means a stalled sequence: a lone ESC and every partial
+  *     sequence are dropped, with no Escape and no re-read (the stall rule, M3d). Keys typed before the terminal applies the push arrive
+  *     in the legacy form, so a lone ESC among them is dropped too.
   *
   * Bounded by [[DecoderLimits]], deterministic, and independent of how the bytes are split into chunks.
   *
@@ -205,7 +220,7 @@ object Decoder {
       if (ignoring) {
         Step(state.copy(mode = Ground), Vector.empty[Event], NoReplies, true)
       } else {
-        dispatch(bytes, b.toChar, state.expectingReplies) match {
+        dispatch(bytes, b.toChar, state) match {
           case (mode, events, replies) => Step(state.copy(mode = mode), events, replies, true)
         }
       }
@@ -231,6 +246,7 @@ object Decoder {
         case 'R' => Vector(key(KeyCode.f(3), KeyModifiers.empty))
         case 'S' => Vector(key(KeyCode.f(4), KeyModifiers.empty))
         case 'M' => Vector(key(KeyCode.Enter, KeyModifiers.empty))
+        case 'E' => Vector(key(KeyCode.KeypadBegin, KeyModifiers.empty))
         case _ => Vector.empty[Event]
       }
       Step(state.copy(mode = Ground), events, NoReplies, true)
@@ -338,8 +354,10 @@ object Decoder {
   private def tick(state: DecoderState): Decoded = {
     val flushedUtf8 = if (state.utf8Need > 0) Vector(printable(Replacement, state.altPending)) else Vector.empty[Event]
     val cleared     = state.copy(utf8 = Vector.empty[Byte], utf8Need = 0, altPending = false)
+    val stalled     = state.keyboard.contains(KittyFlags.Disambiguate)
     state.mode match {
       case Ground | Paste(_, _) => Decoded(cleared, flushedUtf8, NoReplies)
+      case Escape | EscapeIntermediate(_) | Csi(_, _) | Ss3 if stalled => Decoded(cleared.copy(mode = Ground), flushedUtf8, NoReplies)
       case Escape => Decoded(cleared.copy(mode = Ground), flushedUtf8 :+ key(KeyCode.Escape, KeyModifiers.empty), NoReplies)
       case EscapeIntermediate(bytes) => refeed(cleared, flushedUtf8, bytes)
       case Csi(bytes, _) =>
@@ -354,7 +372,8 @@ object Decoder {
   private def refeed(cleared: DecoderState, before: Vector[Event], bytes: Vector[Byte]): Decoded =
     feed(IArray.from(bytes), 0, cleared.copy(mode = Ground), before :+ key(KeyCode.Escape, KeyModifiers.empty), NoReplies)
 
-  final private case class Parsed(marker: Option[Char], params: Vector[Option[Int]], intermediates: Vector[Char])
+  /** A parsed control sequence: the private marker, each `;` parameter as its `:` sub-fields (empty ones `None`), the intermediates. */
+  final private case class Parsed(marker: Option[Char], params: Vector[Vector[Option[Int]]], intermediates: Vector[Char])
 
   private def parse(bytes: Vector[Byte]): Parsed = {
     val chars         = bytes.map(b => (b.toInt & 0xff).toChar)
@@ -363,47 +382,58 @@ object Decoder {
     val paramChars    = rest.takeWhile(c => c >= '0' && c <= '?')
     val intermediates = rest.drop(paramChars.length).filter(c => c >= ' ' && c <= '/')
     val params        =
-      if (paramChars.isEmpty) Vector.empty[Option[Int]]
-      else paramChars.mkString.split(";", -1).toVector.map(p => number(p.takeWhile(_ =!= ':')))
+      if (paramChars.isEmpty) Vector.empty[Vector[Option[Int]]]
+      else paramChars.mkString.split(";", -1).toVector.map(p => p.split(":", -1).toVector.map(number))
     Parsed(marker, params, intermediates)
   }
+
+  /** Sub-field 0 of parameter `i`. */
+  private def param(parsed: Parsed, i: Int): Option[Int] = parsed.params.lift(i).flatMap(_.headOption).flatten
+
+  /** Sub-field `j` of parameter `i`. */
+  private def sub(parsed: Parsed, i: Int, j: Int): Option[Int] = parsed.params.lift(i).flatMap(_.lift(j)).flatten
 
   private def number(s: String): Option[Int] =
     if (s.nonEmpty && s.length <= 7 && s.forall(c => c >= '0' && c <= '9')) s.toInt.some else none[Int]
 
-  private def dispatch(bytes: Vector[Byte], fin: Char, expectingReplies: Boolean): (DecoderMode, Vector[Event], Vector[Reply]) = {
+  private def dispatch(bytes: Vector[Byte], fin: Char, state: DecoderState): (DecoderMode, Vector[Event], Vector[Reply]) = {
     val parsed    = parse(bytes)
     val plain     = parsed.marker.isEmpty && parsed.intermediates.isEmpty
-    val modifiers = parsed.params.lift(1).flatten.map(modifiersOf).getOrElse(KeyModifiers.empty)
+    val kitty     = !state.keyboard.isEmpty
+    val modifiers =
+      param(parsed, 1).map(p => if (kitty) kittyModifiersOf(p) else modifiersOf(p)).getOrElse(KeyModifiers.empty)
+    val kind      = kindOf(sub(parsed, 1, 1))
     fin match {
-      case 'A' if plain => (Ground, Vector(key(KeyCode.Up, modifiers)), NoReplies)
-      case 'B' if plain => (Ground, Vector(key(KeyCode.Down, modifiers)), NoReplies)
-      case 'C' if plain => (Ground, Vector(key(KeyCode.Right, modifiers)), NoReplies)
-      case 'D' if plain => (Ground, Vector(key(KeyCode.Left, modifiers)), NoReplies)
-      case 'H' if plain => (Ground, Vector(key(KeyCode.Home, modifiers)), NoReplies)
-      case 'F' if plain => (Ground, Vector(key(KeyCode.End, modifiers)), NoReplies)
-      case 'P' if plain => (Ground, Vector(key(KeyCode.f(1), modifiers)), NoReplies)
-      case 'Q' if plain => (Ground, Vector(key(KeyCode.f(2), modifiers)), NoReplies)
-      case 'R' if plain && expectingReplies => (Ground, Vector.empty[Event], cursorReport(parsed))
-      case 'R' if plain => (Ground, Vector(key(KeyCode.f(3), modifiers)), NoReplies)
-      case 'S' if plain => (Ground, Vector(key(KeyCode.f(4), modifiers)), NoReplies)
+      case 'A' if plain => (Ground, keyed(KeyCode.Up, modifiers, kind, state), NoReplies)
+      case 'B' if plain => (Ground, keyed(KeyCode.Down, modifiers, kind, state), NoReplies)
+      case 'C' if plain => (Ground, keyed(KeyCode.Right, modifiers, kind, state), NoReplies)
+      case 'D' if plain => (Ground, keyed(KeyCode.Left, modifiers, kind, state), NoReplies)
+      case 'E' if plain => (Ground, keyed(KeyCode.KeypadBegin, modifiers, kind, state), NoReplies)
+      case 'H' if plain => (Ground, keyed(KeyCode.Home, modifiers, kind, state), NoReplies)
+      case 'F' if plain => (Ground, keyed(KeyCode.End, modifiers, kind, state), NoReplies)
+      case 'P' if plain => (Ground, keyed(KeyCode.f(1), modifiers, kind, state), NoReplies)
+      case 'Q' if plain => (Ground, keyed(KeyCode.f(2), modifiers, kind, state), NoReplies)
+      case 'R' if plain && state.expectingReplies => (Ground, Vector.empty[Event], cursorReport(parsed))
+      case 'R' if plain && kitty => (Ground, Vector.empty[Event], NoReplies)
+      case 'R' if plain => (Ground, keyed(KeyCode.f(3), modifiers, kind, state), NoReplies)
+      case 'S' if plain => (Ground, keyed(KeyCode.f(4), modifiers, kind, state), NoReplies)
       case 'Z' if plain => (Ground, Vector(key(KeyCode.BackTab, KeyModifiers(KeyModifier.Shift))), NoReplies)
       case 'I' if plain => (Ground, Vector(Event.FocusGained), NoReplies)
       case 'O' if plain => (Ground, Vector(Event.FocusLost), NoReplies)
       case '~' if plain =>
-        parsed.params.headOption.flatten match {
+        param(parsed, 0) match {
           case Some(200) => (Paste(Vector.empty[Byte], 0), Vector.empty[Event], NoReplies)
-          case Some(n) => (Ground, tilde(n, modifiers), NoReplies)
+          case Some(n) => (Ground, tilde(n).fold(Vector.empty[Event])(code => keyed(code, modifiers, kind, state)), NoReplies)
           case None => (Ground, Vector.empty[Event], NoReplies)
         }
       case 'M' | 'm' if parsed.marker === '<'.some && parsed.params.length === 3 =>
-        (parsed.params.headOption.flatten, parsed.params.lift(1).flatten, parsed.params.lift(2).flatten) match {
+        (param(parsed, 0), param(parsed, 1), param(parsed, 2)) match {
           case (Some(b), Some(x), Some(y)) => (Ground, mouse(b, x, y, fin === 'm', false), NoReplies)
           case (_, _, _) => (Ground, Vector.empty[Event], NoReplies)
         }
       case 'M' if plain && parsed.params.isEmpty => (X10Mouse(Vector.empty[Byte]), Vector.empty[Event], NoReplies)
       case 'M' if plain && parsed.params.length === 3 =>
-        (parsed.params.headOption.flatten, parsed.params.lift(1).flatten, parsed.params.lift(2).flatten) match {
+        (param(parsed, 0), param(parsed, 1), param(parsed, 2)) match {
           case (Some(b), Some(x), Some(y)) if b >= 32 => (Ground, mouse(b - 32, x, y, false, true), NoReplies)
           case (_, _, _) => (Ground, Vector.empty[Event], NoReplies)
         }
@@ -411,19 +441,22 @@ object Decoder {
       case 'c' if parsed.marker === '>'.some =>
         (Ground, Vector.empty[Event], Vector(Reply.SecondaryDeviceAttributes(flatParams(parsed))))
       case 'y' if parsed.marker === '?'.some && parsed.intermediates === Vector('$') =>
-        (parsed.params.headOption.flatten, parsed.params.lift(1).flatten) match {
+        (param(parsed, 0), param(parsed, 1)) match {
           case (Some(mode), Some(value)) => (Ground, Vector.empty[Event], Vector(Reply.PrivateModeReport(mode, value)))
           case (_, _) => (Ground, Vector.empty[Event], NoReplies)
         }
+      case 'u' if parsed.marker === '?'.some && parsed.intermediates.isEmpty =>
+        (Ground, Vector.empty[Event], Vector(Reply.KeyboardFlags(param(parsed, 0).getOrElse(0))))
+      case 'u' if plain => (Ground, kittyKey(parsed, state), NoReplies)
       case _ => (Ground, Vector.empty[Event], NoReplies)
     }
   }
 
-  private def flatParams(parsed: Parsed): Vector[Int] = parsed.params.map(_.getOrElse(0))
+  private def flatParams(parsed: Parsed): Vector[Int] = parsed.params.map(_.headOption.flatten.getOrElse(0))
 
   /** The Cursor Position Report, 1-based in the wire form, 0-based in the reply, dropped outside `1..MaxCoordinate`. */
   private def cursorReport(parsed: Parsed): Vector[Reply] =
-    (parsed.params.headOption.flatten, parsed.params.lift(1).flatten) match {
+    (param(parsed, 0), param(parsed, 1)) match {
       case (Some(row), Some(column))
           if parsed.params.length === 2 && row >= 1 && column >= 1 && row <= DecoderLimits.MaxCoordinate &&
             column <= DecoderLimits.MaxCoordinate =>
@@ -431,37 +464,148 @@ object Decoder {
       case (_, _) => NoReplies
     }
 
-  private def tilde(n: Int, modifiers: KeyModifiers): Vector[Event] = {
-    val code = n match {
-      case 1 | 7 => KeyCode.Home.some
-      case 2 => KeyCode.Insert.some
-      case 3 => KeyCode.Delete.some
-      case 4 | 8 => KeyCode.End.some
-      case 5 => KeyCode.PageUp.some
-      case 6 => KeyCode.PageDown.some
-      case 11 => KeyCode.f(1).some
-      case 12 => KeyCode.f(2).some
-      case 13 => KeyCode.f(3).some
-      case 14 => KeyCode.f(4).some
-      case 15 => KeyCode.f(5).some
-      case 17 => KeyCode.f(6).some
-      case 18 => KeyCode.f(7).some
-      case 19 => KeyCode.f(8).some
-      case 20 => KeyCode.f(9).some
-      case 21 => KeyCode.f(10).some
-      case 23 => KeyCode.f(11).some
-      case 24 => KeyCode.f(12).some
-      case 25 => KeyCode.f(13).some
-      case 26 => KeyCode.f(14).some
-      case 28 => KeyCode.f(15).some
-      case 29 => KeyCode.f(16).some
-      case 31 => KeyCode.f(17).some
-      case 32 => KeyCode.f(18).some
-      case 33 => KeyCode.f(19).some
-      case 34 => KeyCode.f(20).some
-      case _ => none[KeyCode]
+  private def tilde(n: Int): Option[KeyCode] = n match {
+    case 1 | 7 => KeyCode.Home.some
+    case 2 => KeyCode.Insert.some
+    case 3 => KeyCode.Delete.some
+    case 4 | 8 => KeyCode.End.some
+    case 5 => KeyCode.PageUp.some
+    case 6 => KeyCode.PageDown.some
+    case 11 => KeyCode.f(1).some
+    case 12 => KeyCode.f(2).some
+    case 13 => KeyCode.f(3).some
+    case 14 => KeyCode.f(4).some
+    case 15 => KeyCode.f(5).some
+    case 17 => KeyCode.f(6).some
+    case 18 => KeyCode.f(7).some
+    case 19 => KeyCode.f(8).some
+    case 20 => KeyCode.f(9).some
+    case 21 => KeyCode.f(10).some
+    case 23 => KeyCode.f(11).some
+    case 24 => KeyCode.f(12).some
+    case 25 => KeyCode.f(13).some
+    case 26 => KeyCode.f(14).some
+    case 28 => KeyCode.f(15).some
+    case 29 => KeyCode.f(16).some
+    case 31 => KeyCode.f(17).some
+    case 32 => KeyCode.f(18).some
+    case 33 => KeyCode.f(19).some
+    case 34 => KeyCode.f(20).some
+    case 57427 => KeyCode.KeypadBegin.some
+    case _ => none[KeyCode]
+  }
+
+  /** The event kind of the modifier parameter's sub-field: absent or 1 press, 2 repeat, 3 release, `None` for any other value. */
+  private def kindOf(field: Option[Int]): Option[KeyEventKind] = field match {
+    case None | Some(1) => KeyEventKind.Press.some
+    case Some(2) => KeyEventKind.Repeat.some
+    case Some(3) => KeyEventKind.Release.some
+    case Some(_) => none[KeyEventKind]
+  }
+
+  /** The kind filter (design doc 6.2): repeats and releases pass only when the pushed flags contain `EventTypes`, otherwise a repeat is
+    * delivered as a press and a release is dropped.
+    */
+  private def delivered(kind: KeyEventKind, state: DecoderState): Option[KeyEventKind] = kind match {
+    case KeyEventKind.Press => KeyEventKind.Press.some
+    case KeyEventKind.Repeat =>
+      if (state.keyboard.contains(KittyFlags.EventTypes)) KeyEventKind.Repeat.some else KeyEventKind.Press.some
+    case KeyEventKind.Release => Option.when(state.keyboard.contains(KittyFlags.EventTypes))(KeyEventKind.Release)
+  }
+
+  /** One key event of the code when the kind parses and passes the filter. */
+  private def keyed(code: KeyCode, modifiers: KeyModifiers, kind: Option[KeyEventKind], state: DecoderState): Vector[Event] =
+    kind.flatMap(k => delivered(k, state)).fold(Vector.empty[Event])(k => Vector(keyWith(code, modifiers, k)))
+
+  private val CapsLockBit: Int = 64
+
+  private def isSurrogate(cp: Int): Boolean = cp >= 0xd800 && cp <= 0xdfff
+
+  /** A kitty key report (M3d): the associated text when the report carries some and is not a release, the key otherwise. */
+  private def kittyKey(parsed: Parsed, state: DecoderState): Vector[Event] = {
+    val bits      = math.max(0, param(parsed, 1).getOrElse(1) - 1)
+    val modifiers = kittyModifiersOf(bits + 1)
+    val text      = parsed.params.lift(2).fold(Vector.empty[Int])(_.flatten)
+    val reported  = kindOf(sub(parsed, 1, 1))
+    val release   = reported match {
+      case Some(KeyEventKind.Release) => true
+      case Some(KeyEventKind.Press) | Some(KeyEventKind.Repeat) | None => false
     }
-    code.fold(Vector.empty[Event])(c => Vector(key(c, modifiers)))
+    reported.flatMap(k => delivered(k, state)) match {
+      case None => Vector.empty[Event]
+      case Some(kind) =>
+        if (text.nonEmpty && !release) {
+          text.flatMap(cp => textEvents(cp, kind))
+        } else {
+          param(parsed, 0).fold(Vector.empty[Event])(code =>
+            keyEvents(code, sub(parsed, 0, 1), modifiers, (bits & CapsLockBit) !== 0, kind)
+          )
+        }
+    }
+  }
+
+  /** One code point of associated text, decoded as the same character arriving as UTF-8 would be: controls skipped (the specification
+    * forbids them in text), an invalid scalar as U+FFFD.
+    */
+  private def textEvents(cp: Int, kind: KeyEventKind): Vector[Event] =
+    if (cp < 0x20 || cp === Del) Vector.empty[Event]
+    else if (cp > 0x10ffff || isSurrogate(cp)) Vector(printableWith(Replacement, kind))
+    else scalarEventsWith(cp, kind)
+
+  /** The key of a report without text (M3d): the named keys, the Private Use Area keys, a letter by Shift xor Caps Lock, another
+    * character as its shifted key when Shift is held and the report names one.
+    */
+  private def keyEvents(code: Int, shifted: Option[Int], modifiers: KeyModifiers, caps: Boolean, kind: KeyEventKind): Vector[Event] = {
+    val shift = modifiers.contains(KeyModifier.Shift)
+    code match {
+      case 9 => Vector(keyWith(if (shift) KeyCode.BackTab else KeyCode.Tab, modifiers, kind))
+      case 13 => Vector(keyWith(KeyCode.Enter, modifiers, kind))
+      case 27 => Vector(keyWith(KeyCode.Escape, modifiers, kind))
+      case 127 => Vector(keyWith(KeyCode.Backspace, modifiers, kind))
+      case c if c < 0x20 => Vector.empty[Event]
+      case c if c >= KittyKeys.First && c <= KittyKeys.Last =>
+        KittyKeys.keyCodeOf(c).fold(Vector.empty[Event])(k => Vector(keyWith(k, modifiers, kind)))
+      case c if c > 0x10ffff || isSurrogate(c) => Vector.empty[Event]
+      case c if c >= 'A'.toInt && c <= 'Z'.toInt =>
+        Vector(keyWith(KeyCode.char(c.toChar), modifiers.add(KeyModifier.Shift), kind))
+      case c if c >= 'a'.toInt && c <= 'z'.toInt =>
+        if (shift ^ caps) Vector(keyWith(KeyCode.char((c - 0x20).toChar), modifiers.add(KeyModifier.Shift), kind))
+        else Vector(keyWith(KeyCode.char(c.toChar), modifiers.remove(KeyModifier.Shift), kind))
+      case c =>
+        shifted.filter(s => s >= 0x20 && s =!= Del && s <= 0x10ffff && !isSurrogate(s)) match {
+          case Some(s) if shift => scalarKeys(s, modifiers.remove(KeyModifier.Shift), kind)
+          case Some(_) | None => scalarKeys(c, modifiers, kind)
+        }
+    }
+  }
+
+  /** A scalar as one `Char` key event, or two carrying the surrogate halves, with the modifiers and kind given. */
+  private def scalarKeys(cp: Int, modifiers: KeyModifiers, kind: KeyEventKind): Vector[Event] =
+    if (cp <= 0xffff) {
+      Vector(keyWith(KeyCode.char(cp.toChar), modifiers, kind))
+    } else {
+      val offset = cp - 0x10000
+      Vector(
+        keyWith(KeyCode.char((0xd800 + (offset >> 10)).toChar), modifiers, kind),
+        keyWith(KeyCode.char((0xdc00 + (offset & 0x3ff)).toChar), modifiers, kind),
+      )
+    }
+
+  /** The kitty modifier parameter: `1 + Shift 1 + Alt 2 + Control 4 + Super 8 + Hyper 16 + Meta 32`, Caps Lock 64 and Num Lock 128
+    * dropped (the event model has no lock state, design doc 6.2), a parameter below 1 meaning none.
+    */
+  def kittyModifiersOf(parameter: Int): KeyModifiers = {
+    val bits = math.max(0, parameter - 1)
+    KeyModifiers.of(
+      List(
+        Option.when((bits & 1) !== 0)(KeyModifier.Shift),
+        Option.when((bits & 2) !== 0)(KeyModifier.Alt),
+        Option.when((bits & 4) !== 0)(KeyModifier.Control),
+        Option.when((bits & 8) !== 0)(KeyModifier.Super),
+        Option.when((bits & 16) !== 0)(KeyModifier.Hyper),
+        Option.when((bits & 32) !== 0)(KeyModifier.Meta),
+      ).flatten
+    )
   }
 
   /** The xterm modifier parameter: `1 + Shift 1 + Alt 2 + Control 4 + Meta 8`. */
@@ -519,6 +663,20 @@ object Decoder {
   }
 
   private def key(code: KeyCode, modifiers: KeyModifiers): Event = Event.key(KeyEvent(code, modifiers, KeyEventKind.Press))
+
+  private def keyWith(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind): Event = Event.key(KeyEvent(code, modifiers, kind))
+
+  /** A character of text with the given kind: Shift only for `A` to `Z`, never Alt (the UTF-8 path's convention). */
+  private def printableWith(c: Char, kind: KeyEventKind): Event =
+    keyWith(KeyCode.char(c), if (c >= 'A' && c <= 'Z') KeyModifiers(KeyModifier.Shift) else KeyModifiers.empty, kind)
+
+  private def scalarEventsWith(cp: Int, kind: KeyEventKind): Vector[Event] =
+    if (cp <= 0xffff) {
+      Vector(printableWith(cp.toChar, kind))
+    } else {
+      val offset = cp - 0x10000
+      Vector(printableWith((0xd800 + (offset >> 10)).toChar, kind), printableWith((0xdc00 + (offset & 0x3ff)).toChar, kind))
+    }
 
   private def printable(c: Char, alt: Boolean): Event = {
     val shift     = c >= 'A' && c <= 'Z'

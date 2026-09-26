@@ -104,24 +104,40 @@ jobs:
           if [ "${{ matrix.platform }}" = "js" ]; then node --version; fi
           sbt -v clean ${{ matrix.tasks }}
 
-      # The M2c demo-run gate (issue 23): the demo under a PTY, clean exit only, in both screen modes. The four-exit-path
-      # restore matrix stays a local PTY-driver verification until the M4 harness lands in the repo.
+      # The demo-run gate (M2c issue 23, extended in M3d issue 36): the demo under a PTY in both screen modes, with the probe
+      # unanswered, answered by a terminal without the kitty keyboard protocol (no push may appear), and answered by one with it
+      # across the four exit paths (q, the Ctrl-C key, the `!` crash, SIGTERM), each asserting one push and one pop in order.
       - name: "PTY smoke (jvm)"
         if: matrix.platform == 'jvm'
         run: |
           sbt examplesJVM/writeRuntimeClasspath
           CP=$(cat modules/examples/jvm/target/runtime-classpath.txt)
-          python3 scripts/pty-smoke/smoke.py -- java -cp "$CP" stui.examples.Main
-          python3 scripts/pty-smoke/smoke.py -- java -cp "$CP" stui.examples.Main inline
+          for mode in "" inline; do
+            python3 scripts/pty-smoke/smoke.py -- java -cp "$CP" stui.examples.Main $mode
+            python3 scripts/pty-smoke/smoke.py --probe legacy -- java -cp "$CP" stui.examples.Main $mode
+            for exit in q ctrl-c crash sigterm; do
+              python3 scripts/pty-smoke/smoke.py --probe kitty --exit "$exit" -- java -cp "$CP" stui.examples.Main $mode
+            done
+          done
 
       - name: "PTY smoke (native)"
         if: matrix.platform == 'native'
         run: |
-          python3 scripts/pty-smoke/smoke.py -- modules/examples/native/target/scala-3.3.8/examples
-          python3 scripts/pty-smoke/smoke.py -- modules/examples/native/target/scala-3.3.8/examples inline
+          for mode in "" inline; do
+            python3 scripts/pty-smoke/smoke.py -- modules/examples/native/target/scala-3.3.8/examples $mode
+            python3 scripts/pty-smoke/smoke.py --probe legacy -- modules/examples/native/target/scala-3.3.8/examples $mode
+            for exit in q ctrl-c crash sigterm; do
+              python3 scripts/pty-smoke/smoke.py --probe kitty --exit "$exit" -- modules/examples/native/target/scala-3.3.8/examples $mode
+            done
+          done
 
       - name: "PTY smoke (js)"
         if: matrix.platform == 'js'
         run: |
-          python3 scripts/pty-smoke/smoke.py -- node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js
-          python3 scripts/pty-smoke/smoke.py -- node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js inline
+          for mode in "" inline; do
+            python3 scripts/pty-smoke/smoke.py -- node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js $mode
+            python3 scripts/pty-smoke/smoke.py --probe legacy -- node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js $mode
+            for exit in q ctrl-c crash sigterm; do
+              python3 scripts/pty-smoke/smoke.py --probe kitty --exit "$exit" -- node modules/examples/js/target/scala-3.3.8/examples-fastopt/main.js $mode
+            done
+          done

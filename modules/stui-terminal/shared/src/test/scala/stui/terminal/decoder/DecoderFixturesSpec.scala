@@ -5,6 +5,7 @@ import hedgehog.runner.*
 import refined4s.types.numeric.NonNegInt
 import stui.core.event.*
 import stui.core.geometry.Position
+import stui.terminal.kitty.KittyFlags
 import stui.testkit.Assertions
 
 /** Byte sequences and the events they decode to (xterm ctlseqs, the DEC ANSI parser reference).
@@ -44,6 +45,27 @@ object DecoderFixturesSpec extends Properties {
 
   private def row(name: String, expected: Vector[Event], inputs: DecoderInput*): Test =
     example(name, Assertions.eqv(decode(inputs*), expected))
+
+  private def decodeIn(state: DecoderState, inputs: DecoderInput*): Vector[Event] = Decoder.stepAll(state, inputs.toVector).events
+
+  /** A row decoded in a state with the kitty flags pushed (M3d). */
+  private def kittyRow(name: String, state: DecoderState, expected: Vector[Event], inputs: DecoderInput*): Test =
+    example(name, Assertions.eqv(decodeIn(state, inputs*), expected))
+
+  private def pushed(bits: Int): DecoderState = DecoderState.initial.withKeyboard(KittyFlags.fromInt(bits))
+
+  private val k1: DecoderState = pushed(1)
+
+  private val k3: DecoderState = pushed(3)
+
+  private val k7: DecoderState = pushed(7)
+
+  private val k27: DecoderState = pushed(27)
+
+  private def keyOf(code: KeyCode, kind: KeyEventKind, modifiers: KeyModifier*): Event =
+    Event.key(KeyEvent(code, KeyModifiers(modifiers*), kind))
+
+  private def release(code: KeyCode, modifiers: KeyModifier*): Event = keyOf(code, KeyEventKind.Release, modifiers*)
 
   override def tests: List[Test] = List(
     row("a", Vector(char('a')), text("a")),
@@ -122,13 +144,13 @@ object DecoderFixturesSpec extends Properties {
     row("a DCS reply terminated by ST is consumed", Vector(char('a')), esc("P1+r524742=1" + EscText + "\\"), text("a")),
     row("a DA1 reply is consumed", Vector.empty[Event], esc("[?62;22c")),
     row("a DECRPM reply is consumed", Vector.empty[Event], esc("[?2026;2$y")),
-    row("a kitty key report is consumed", Vector.empty[Event], esc("[97u")),
+    row("a kitty key report decodes in the legacy state", Vector(char('a')), esc("[97u")),
     row("a charset designation is consumed", Vector(char('a')), esc("(B"), text("a")),
-    row("a 300-byte control sequence is consumed", Vector(char('a')), esc("[" + "1;" * 150 + "A"), text("a")),
+    row("a 1 200-byte control sequence is consumed", Vector(char('a')), esc("[" + "1;" * 600 + "A"), text("a")),
     row("an ESC-terminated OSC followed by [A decodes as Up", Vector(key(KeyCode.Up)), esc("]0;title" + EscText + "[A")),
     example(
       "the state returns to ground after an over-long sequence",
-      Assertions.eqv(Decoder.step(DecoderState.initial, esc("[" + "1;" * 150 + "A")).state, DecoderState.initial),
+      Assertions.eqv(Decoder.step(DecoderState.initial, esc("[" + "1;" * 600 + "A")).state, DecoderState.initial),
     ),
     example("awaiting after ESC", Result.assert(Decoder.step(DecoderState.initial, esc("")).state.awaiting)),
     example("not awaiting inside a paste", Result.assert(!Decoder.step(DecoderState.initial, esc("[200~he")).state.awaiting)),
@@ -167,6 +189,88 @@ object DecoderFixturesSpec extends Properties {
       text(EscText + "\\"),
     ),
     example("a CPR is a reply while expecting and F3 with modifiers otherwise", testCpr),
+    kittyRow("k1: CSI 27u is Escape", k1, Vector(key(KeyCode.Escape)), esc("[27u")),
+    kittyRow("k1: CSI 99;5u is Control+c", k1, Vector(char('c', KeyModifier.Control)), esc("[99;5u")),
+    kittyRow("k1: CSI 120;3u is Alt+x", k1, Vector(char('x', KeyModifier.Alt)), esc("[120;3u")),
+    kittyRow("k1: CSI 13u is Enter", k1, Vector(key(KeyCode.Enter)), esc("[13u")),
+    kittyRow("k1: CSI 9;2u is Shift+BackTab", k1, Vector(key(KeyCode.BackTab, KeyModifier.Shift)), esc("[9;2u")),
+    kittyRow("k1: CSI 127;5u is Control+Backspace", k1, Vector(key(KeyCode.Backspace, KeyModifier.Control)), esc("[127;5u")),
+    kittyRow("k1: CSI 1;9A is Super+Up", k1, Vector(key(KeyCode.Up, KeyModifier.Super)), esc("[1;9A")),
+    row("legacy: CSI 1;9A is Meta+Up", Vector(key(KeyCode.Up, KeyModifier.Meta)), esc("[1;9A")),
+    kittyRow("k1: CSI 1;33A is Meta+Up", k1, Vector(key(KeyCode.Up, KeyModifier.Meta)), esc("[1;33A")),
+    kittyRow("k1: CSI 1;65A (Caps Lock) is Up", k1, Vector(key(KeyCode.Up)), esc("[1;65A")),
+    kittyRow("k1: CSI 57399u (KP_0) is 0", k1, Vector(char('0')), esc("[57399u")),
+    kittyRow("k1: CSI 57414u (KP_ENTER) is Enter", k1, Vector(key(KeyCode.Enter)), esc("[57414u")),
+    kittyRow("k1: CSI 57427u is Keypad Begin", k1, Vector(key(KeyCode.KeypadBegin)), esc("[57427u")),
+    kittyRow("k1: CSI E is Keypad Begin", k1, Vector(key(KeyCode.KeypadBegin)), esc("[E")),
+    kittyRow("k1: CSI 1;2E is Shift+Keypad Begin", k1, Vector(key(KeyCode.KeypadBegin, KeyModifier.Shift)), esc("[1;2E")),
+    kittyRow("k1: SS3 E is Keypad Begin", k1, Vector(key(KeyCode.KeypadBegin)), esc("OE")),
+    kittyRow("k1: CSI 57427~ is Keypad Begin", k1, Vector(key(KeyCode.KeypadBegin)), esc("[57427~")),
+    kittyRow("k1: CSI 57376u is F13", k1, Vector(key(KeyCode.f(13))), esc("[57376u")),
+    kittyRow("k1: CSI 57398u is F35", k1, Vector(key(KeyCode.f(35))), esc("[57398u")),
+    kittyRow("k1: CSI 57428u is Play", k1, Vector(key(KeyCode.media(MediaKey.Play))), esc("[57428u")),
+    kittyRow(
+      "k1: CSI 57441;2u is Left Shift with Shift",
+      k1,
+      Vector(key(KeyCode.modifier(ModifierKey.LeftShift), KeyModifier.Shift)),
+      esc("[57441;2u"),
+    ),
+    kittyRow("k1: CSI 12615u is a jamo", k1, Vector(char('ㅇ')), esc("[12615u")),
+    kittyRow("k1: CSI 128512u is two surrogate chars", k1, Vector(char('\ud83d'), char('\ude00')), esc("[128512u")),
+    kittyRow("k1: CSI 65u gains Shift", k1, Vector(char('A', KeyModifier.Shift)), esc("[65u")),
+    kittyRow("k1: a release without EventTypes is dropped", k1, Vector.empty[Event], esc("[97;2:3u")),
+    kittyRow("k1: a repeat without EventTypes is a press", k1, Vector(char('a')), esc("[97;1:2u")),
+    kittyRow("k1: control, zero, and unknown PUA codes are dropped", k1, Vector.empty[Event], esc("[1u"), esc("[0u"), esc("[60000u")),
+    kittyRow("k1: a late cursor report is dropped", k1, Vector.empty[Event], esc("[24;80R")),
+    kittyRow("k1: a lone ESC stalls without Escape", k1, Vector.empty[Event], esc(""), DecoderInput.Tick),
+    kittyRow("k1: ESC [ stalls without Alt+[", k1, Vector.empty[Event], esc("["), DecoderInput.Tick),
+    kittyRow("k1: ESC [ 2 7 stalls without keys", k1, Vector.empty[Event], esc("[27"), DecoderInput.Tick),
+    kittyRow("k1: a truncated UTF-8 lead still ticks to U+FFFD", k1, Vector(char(Replacement)), bytes(0xc3), DecoderInput.Tick),
+    kittyRow("k3: Escape release", k3, Vector(release(KeyCode.Escape)), esc("[27;1:3u")),
+    kittyRow("k3: CSI 1;1:1A is an Up press", k3, Vector(key(KeyCode.Up)), esc("[1;1:1A")),
+    kittyRow("k3: CSI 1;1:3A is an Up release", k3, Vector(release(KeyCode.Up)), esc("[1;1:3A")),
+    kittyRow("k3: a release", k3, Vector(release(KeyCode.char('a'))), esc("[97;1:3u")),
+    kittyRow("k3: Shift+a release is A with Shift", k3, Vector(release(KeyCode.char('A'), KeyModifier.Shift)), esc("[97;2:3u")),
+    kittyRow("k3: Caps Lock a release is A with Shift", k3, Vector(release(KeyCode.char('A'), KeyModifier.Shift)), esc("[97;65:3u")),
+    kittyRow("k3: Shift and Caps Lock a release is a", k3, Vector(release(KeyCode.char('a'))), esc("[97;66:3u")),
+    kittyRow("k3: Delete release", k3, Vector(release(KeyCode.Delete)), esc("[3;1:3~")),
+    kittyRow("k3: F3 release", k3, Vector(release(KeyCode.f(3))), esc("[13;1:3~")),
+    kittyRow("k3: the iTerm2 Option+x release", k3, Vector(release(KeyCode.char('≈'))), esc("[8776;1:3u")),
+    kittyRow("k3: the Ghostty Option+x release", k3, Vector(release(KeyCode.char('x'), KeyModifier.Alt)), esc("[120;3:3u")),
+    kittyRow("k3: an input-method jamo release", k3, Vector(release(KeyCode.char('ㅇ'))), esc("[12615;1:3u")),
+    kittyRow("k7: the shifted key names the release", k7, Vector(release(KeyCode.char('$'))), esc("[52:36;2:3u")),
+    kittyRow("k7: the shifted key with Control", k7, Vector(char('$', KeyModifier.Control)), esc("[52:36;6u")),
+    kittyRow("k27: a with its text", k27, Vector(char('a')), esc("[97;;97u")),
+    kittyRow("k27: Shift+a with its text", k27, Vector(char('A', KeyModifier.Shift)), esc("[97;2;65u")),
+    kittyRow("k27: Option+x text is the character without Alt", k27, Vector(char('≈')), esc("[120;3;8776u")),
+    kittyRow("k27: a commit on o is its text", k27, Vector(char('私'), char('は')), esc("[111;;31169:12399u")),
+    kittyRow("k27: a commit on Enter is its text, no Enter", k27, Vector(char('歌'), char('で')), esc("[13;;27468:12391u")),
+    kittyRow("k27: a Hangul commit", k27, Vector(char('안')), esc("[12596;;50504u")),
+    kittyRow("k27: astral text is two surrogate chars", k27, Vector(char('\ud83d'), char('\ude00')), esc("[13;;128512u")),
+    kittyRow("k27: a pure text event", k27, Vector(char('å')), esc("[0;;229u")),
+    kittyRow("k27: a control code point in text is skipped", k27, Vector(char('å')), esc("[13;;1:229u")),
+    row("legacy: CSI 99;5u is Control+c", Vector(char('c', KeyModifier.Control)), esc("[99;5u")),
+    row("legacy: a kitty release is dropped", Vector.empty[Event], esc("[97;1:3u")),
+    row("legacy: a legacy-form release is dropped", Vector.empty[Event], esc("[1;5:3A")),
+    replyRow("the kitty flags answer is a reply", Vector(Reply.KeyboardFlags(1)), esc("[?1u")),
+    replyRow("an empty kitty flags answer is 0", Vector(Reply.KeyboardFlags(0)), esc("[?u")),
+    replyRow("a kitty flags answer of 27", Vector(Reply.KeyboardFlags(27)), esc("[?27u")),
+    example(
+      "the kitty modifier parameter",
+      Result.all(
+        List(
+          Assertions.eqv(Decoder.kittyModifiersOf(1), KeyModifiers.empty),
+          Assertions.eqv(Decoder.kittyModifiersOf(9), KeyModifiers(KeyModifier.Super)),
+          Assertions.eqv(Decoder.kittyModifiersOf(17), KeyModifiers(KeyModifier.Hyper)),
+          Assertions.eqv(Decoder.kittyModifiersOf(33), KeyModifiers(KeyModifier.Meta)),
+          Assertions.eqv(Decoder.kittyModifiersOf(65), KeyModifiers.empty),
+          Assertions.eqv(
+            Decoder.kittyModifiersOf(256),
+            KeyModifiers(KeyModifier.Shift, KeyModifier.Alt, KeyModifier.Control, KeyModifier.Super, KeyModifier.Hyper, KeyModifier.Meta),
+          ),
+        )
+      ),
+    ),
     example("an out-of-range CPR is dropped while expecting", testCprOutOfRange),
     example(
       "the modifier parameter",

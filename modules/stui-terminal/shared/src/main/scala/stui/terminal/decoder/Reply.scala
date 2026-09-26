@@ -16,6 +16,8 @@ import stui.core.geometry.Position
   *   - `VersionReply`: XTVERSION `DCS > | text ST`.
   *   - `PrimaryDeviceAttributes`: DA1 `CSI ? Ps ; ... c`, the probe's sentinel.
   *   - `SecondaryDeviceAttributes`: DA2 `CSI > Pp ; Pv ; Pc c`, recorded and unused in M1f.
+  *   - `KeyboardFlags`: the kitty keyboard protocol's answer `CSI ? flags u` to the query `CSI ? u` (M3d), recognised always, the flags
+  *     currently set on the answering screen. A DA1 answer without it means the terminal does not support the protocol.
   *
   * @author Kevin Lee
   * @since 2026-08-30
@@ -27,6 +29,7 @@ enum Reply derives Eq, Show, Hash {
   case VersionReply(text: String)
   case PrimaryDeviceAttributes(parameters: Vector[Int])
   case SecondaryDeviceAttributes(parameters: Vector[Int])
+  case KeyboardFlags(flags: Int)
 }
 
 object Reply {

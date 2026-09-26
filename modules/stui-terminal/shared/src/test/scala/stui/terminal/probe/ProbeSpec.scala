@@ -28,7 +28,7 @@ object ProbeSpec extends Properties {
   private val invalid: Reply = Reply.TermcapReply(false, Vector(Reply.TermcapEntry("Tc", Option.empty[String])))
 
   override def tests: List[Test] = List(
-    example("the batch asks 2026, RGB and Tc, the version, DA2, the cursor, and DA1 last", testBatch),
+    example("the batch asks 2026, RGB and Tc, the version, DA2, the cursor, the kitty flags, and DA1 last", testBatch),
     example("the result readers pick the right replies", testReaders),
     example("the sentinel is reached only by a DA1 reply", testSentinelReached),
     example("the sync answers map 0 to 4 as the specification says", testSyncAnswers),
@@ -40,7 +40,31 @@ object ProbeSpec extends Properties {
     example("a truecolour answer upgrades colours unless the base is Mono", testTruecolorPatch),
     example("a known identity sets truecolour and extended underlines", testIdentityPatch),
     example("identity upgrades are dropped under a multiplexer while the sync answer passes", testMultiplexerRows),
+    example("a kitty flags answer sets kittyKeyboard, except under a multiplexer", testKittyPatch),
   )
+
+  def testKittyPatch: Result = {
+    val answered = result(Reply.KeyboardFlags(0), Reply.PrimaryDeviceAttributes(Vector(62)))
+    Result.all(
+      List(
+        Assertions.eqv(ProbePolicy.patch(Capabilities.conservative, answered), CapabilitiesPatch.empty.withKittyKeyboard(true)),
+        Assertions.eqv(
+          ProbePolicy.patch(Capabilities.conservative, result(Reply.PrimaryDeviceAttributes(Vector(62)))),
+          CapabilitiesPatch.empty,
+        ),
+        Assertions
+          .eqv(ProbePolicy.patch(Capabilities.conservative.copy(multiplexer = Multiplexer.Tmux), answered), CapabilitiesPatch.empty),
+        Assertions.eqv(
+          ProbePolicy.patch(Capabilities.conservative.copy(multiplexer = Multiplexer.Screen), answered),
+          CapabilitiesPatch.empty,
+        ),
+        Assertions.eqv(
+          ProbePolicy.patch(Capabilities.conservative.copy(multiplexer = Multiplexer.Zellij), answered),
+          CapabilitiesPatch.empty,
+        ),
+      )
+    )
+  }
 
   def testBatch: Result =
     Result.all(
@@ -49,7 +73,7 @@ object ProbeSpec extends Properties {
         Assertions.eqv(
           ProbeQueries.batch,
           Sequences.Csi + "?2026$p" + Sequences.Esc + "P+q524742;5463" + Sequences.Esc + "\\" + Sequences.Csi + ">0q" +
-            Sequences.Csi + ">c" + Sequences.Csi + "6n" + Sequences.Csi + "c",
+            Sequences.Csi + ">c" + Sequences.Csi + "6n" + Sequences.Csi + "?u" + Sequences.Csi + "c",
         ),
         Result.assert(ProbeQueries.batch.endsWith(Sequences.Csi + "c")).log("the sentinel is last"),
       )
@@ -76,6 +100,7 @@ object ProbeSpec extends Properties {
           .assert(!ProbeResult.sentinelReached(Vector(Reply.CursorPosition(Position(NonNegInt(0), NonNegInt(3))))))
           .log("CPR alone"),
         Result.assert(!ProbeResult.sentinelReached(Vector.empty[Reply])).log("empty"),
+        Result.assert(!ProbeResult.sentinelReached(Vector(Reply.KeyboardFlags(0)))).log("kitty flags alone"),
       )
     )
 
@@ -99,6 +124,8 @@ object ProbeSpec extends Properties {
         Result.assert(!result(invalid).truecolorAnswered).log("invalid"),
         Assertions.eqv(ProbeResult.empty.cursorRow, none[NonNegInt]),
         Assertions.eqv(ProbeResult.empty.identity, none[String]),
+        Result.assert(!full.kittyKeyboardAnswered).log("no kitty answer"),
+        Result.assert(result(Reply.KeyboardFlags(0)).kittyKeyboardAnswered).log("kitty answer"),
       )
     )
   }

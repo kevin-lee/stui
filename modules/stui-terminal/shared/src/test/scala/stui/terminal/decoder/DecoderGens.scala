@@ -3,10 +3,12 @@ package stui.terminal.decoder
 import hedgehog.{Gen, Range}
 import refined4s.types.numeric.NonNegInt
 import stui.core.event.Event
+import stui.terminal.kitty.KittyFlags
 import stui.testkit.gen.EventGens
 import stui.unicode.internal.IntOps.*
 
-/** Generators for the decoder laws: random byte chunks, inputs with ticks, chunk splits, encodable events, and printable text.
+/** Generators for the decoder laws: random byte chunks, inputs with ticks, chunk splits, encodable events, printable text, and the
+  * kitty keyboard protocol's flags, states, events, and text (M3d).
   *
   * @author Kevin Lee
   * @since 2026-08-29
@@ -35,5 +37,22 @@ object DecoderGens {
   /** Printable text of BMP scalars (no controls, no DEL, no surrogates), 0 to 20 characters. */
   val printableText: Gen[String] =
     Gen.string(Gen.unicode.filter(c => c >= ' ' && (c.toInt !== 0x7f) && !Character.isSurrogate(c)), Range.linear(0, 20))
+
+  /** The flag sets the laws push: disambiguate, with event types, with alternate keys, and the full report set. */
+  val kittyFlags: Gen[KittyFlags] = Gen.element1(1, 3, 7, 27).map(KittyFlags.fromInt)
+
+  /** The initial state with no flags or one of [[kittyFlags]] pushed. */
+  val kittyState: Gen[DecoderState] =
+    Gen.frequency1(1 -> Gen.constant(KittyFlags.none), 4 -> kittyFlags).map(DecoderState.initial.withKeyboard)
+
+  /** Events with a canonical kitty form under the flags (plan refinement D7: the kitty encoder is nearly total, so few are discarded). */
+  def kittyEncodable(flags: KittyFlags): Gen[Event] =
+    EventGens.event(NonNegInt(200)).filter(event => Encoder.encodeKitty(flags, event).isDefined)
+
+  /** Non-empty printable text, the associated text of a kitty report. */
+  val reportText: Gen[String] = printableText.filter(_.nonEmpty)
+
+  /** A lowercase ASCII letter. */
+  val letter: Gen[Char] = Gen.char('a', 'z')
 
 }

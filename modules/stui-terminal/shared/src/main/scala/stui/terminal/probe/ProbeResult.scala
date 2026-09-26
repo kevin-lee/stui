@@ -30,7 +30,7 @@ object ProbeResult {
   def sentinelReached(replies: Vector[Reply]): Boolean = replies.exists {
     case Reply.PrimaryDeviceAttributes(_) => true
     case Reply.CursorPosition(_) | Reply.PrivateModeReport(_, _) | Reply.TermcapReply(_, _) | Reply.VersionReply(_) |
-        Reply.SecondaryDeviceAttributes(_) =>
+        Reply.SecondaryDeviceAttributes(_) | Reply.KeyboardFlags(_) =>
       false
   }
 
@@ -52,6 +52,14 @@ object ProbeResult {
     def truecolorAnswered: Boolean = result.replies.exists {
       case Reply.TermcapReply(true, entries) => entries.exists(entry => ProbeQueries.TruecolorNames.contains(entry.name))
       case Reply.TermcapReply(false, _) | Reply.CursorPosition(_) | Reply.PrivateModeReport(_, _) | Reply.VersionReply(_) |
+          Reply.PrimaryDeviceAttributes(_) | Reply.SecondaryDeviceAttributes(_) | Reply.KeyboardFlags(_) =>
+        false
+    }
+
+    /** True when the terminal answered the kitty keyboard flags query (M3d): it supports the protocol. */
+    def kittyKeyboardAnswered: Boolean = result.replies.exists {
+      case Reply.KeyboardFlags(_) => true
+      case Reply.CursorPosition(_) | Reply.PrivateModeReport(_, _) | Reply.TermcapReply(_, _) | Reply.VersionReply(_) |
           Reply.PrimaryDeviceAttributes(_) | Reply.SecondaryDeviceAttributes(_) =>
         false
     }
