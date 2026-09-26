@@ -34,7 +34,7 @@ jobs:
 
       # The action's jvm input defaults to temurin:17 and puts it first on the PATH, which silently replaced setup-java's
       # Temurin 21 for the sbt step (2026-08-23). JDK 21 is the project baseline.
-      - uses: VirtusLab/scala-cli-setup@v1.17.0
+      - uses: VirtusLab/scala-cli-setup@v1.17.1
         with:
           jvm: "temurin:21"
 
